@@ -1,0 +1,28 @@
+# =============================================================================
+# Netlify deployment configuration for Rolebox Docs (VitePress)
+#
+# Pre-requisites:
+#   1. Connect GitHub repo in Netlify Dashboard
+#   2. Build command: npm run docs:build
+#   3. Publish directory: docs/.vitepress/dist
+#   4. Optional: NETLIFY_AUTH_TOKEN for CLI deployments
+# =============================================================================
+
+[build]
+  command = "npm run docs:build"
+  publish = "docs/.vitepress/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Cache control for static assets (1 year immutable)
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# SPA fallback — VitePress handles its own routing
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

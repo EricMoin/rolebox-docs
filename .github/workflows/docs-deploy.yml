@@ -1,0 +1,58 @@
+# =============================================================================
+# Deploy VitePress site to GitHub Pages
+#
+# Trigger: manual only (workflow_dispatch)
+# Destination: gh-pages branch
+# Pre-requisites:
+#   1. Repository Settings > Pages > Source: "Deploy from a branch"
+#      → Branch: gh-pages, folder: / (root)
+#   2. If deploying to a subpath (e.g. https://<user>.github.io/<repo>/),
+#      set `base: "/<repo>/"` in docs/.vitepress/config.ts
+# =============================================================================
+
+name: Deploy VitePress site to Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_dir:
+        description: "Build output directory"
+        required: false
+        default: "docs/.vitepress/dist"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build VitePress site
+        run: npm run docs:build
+
+      - name: Deploy to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ github.event.inputs.publish_dir }}
+          publish_branch: gh-pages
+          force_orphan: true
+          user_name: "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "docs: deploy VitePress site [skip ci]"
