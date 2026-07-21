@@ -15,7 +15,7 @@ hero:
       link: /01-Overview/quick-start
     - theme: alt
       text: GitHub
-      link: https://github.com/mgdream/rolebox
+      link: https://github.com/EricMoin/rolebox
     - theme: alt
       text: 角色注册表
       link: https://github.com/EricMoin/oh-my-role

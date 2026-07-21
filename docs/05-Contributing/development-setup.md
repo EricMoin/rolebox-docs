@@ -24,7 +24,7 @@ rolebox 使用 Bun 作为运行时和包管理器。如果尚未安装 Bun，请
 ## 克隆与安装
 
 ```bash
-git clone https://github.com/mgdream/rolebox.git
+git clone https://github.com/EricMoin/rolebox.git
 cd rolebox
 bun install
 ```
