@@ -11,7 +11,7 @@ description: PR 流程、代码风格与测试规范
 
 ## 贡献流程
 
-1. **Fork 仓库** — 将 [rolebox](https://github.com/mgdream/rolebox) fork 到你的 GitHub 账号
+1. **Fork 仓库** — 将 [rolebox](https://github.com/EricMoin/rolebox) fork 到你的 GitHub 账号
 2. **创建分支** — 从 `main` 分支创建功能分支：`git checkout -b feat/my-feature`
 3. **开发** — 实现变更，确保通过类型检查和测试
 4. **提交** — 使用约定的提交消息格式

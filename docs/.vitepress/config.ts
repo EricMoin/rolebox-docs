@@ -111,7 +111,7 @@ export default withMermaid(
       ],
 
       socialLinks: [
-        { icon: "github", link: "https://github.com/mgdream/rolebox" },
+        { icon: "github", link: "https://github.com/EricMoin/rolebox" },
       ],
 
       footer: {
