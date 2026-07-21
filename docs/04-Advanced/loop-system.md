@@ -338,7 +338,7 @@ await this._advanceFromSummarizing(originSessionId);
 flowchart TD
     A[用户输入 /stop-loop] --> B{shouldCancelLoop?}
     B -->|waiting_worker/dispatching| C[设置 cancelRequested]
-    C --> D[cancelNow()]
+    C --> D["cancelNow()"]
     D --> E[清理 worker 监听器]
     E --> F[设置 phase=finalizing]
     F --> G[finalizeLoop: 取消活跃 worker,<br/>标记剩余 round 为 cancelled,<br/>注入完成笔记]

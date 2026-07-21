@@ -10,7 +10,7 @@ export default withMermaid(
     description: "AI agent orchestration framework with dispatch, state machines, and multi-agent collaboration",
 
     themeConfig: {
-      logo: false,
+      logo: "/logo.svg",
 
       search: {
         provider: "local",
