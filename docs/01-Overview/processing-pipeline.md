@@ -78,7 +78,7 @@ sequenceDiagram
     OP->>MDL: 模型调用
     MDL->>TB: 工具调用
     TB->>TB: 参数验证 (zod)
->>TK: 执行工具
+    TB->>TK: 执行工具
     TK->>DM: 子代理派发
     DM->>SA: dispatch / task
     SA-->>DM: 返回结果

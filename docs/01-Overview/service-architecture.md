@@ -267,7 +267,7 @@ sequenceDiagram
     participant Sub as 子代理
 
     Hook->>Hook: 解析 |loop:N| 函数
-    Hook->>Loop: register(loop 任务)
+    Hook->>Loop: register(循环任务)
     Loop->>Dispatch: dispatch(子代理)
     Dispatch->>Sub: 启动子代理会话
     Sub-->>Dispatch: 返回结果
