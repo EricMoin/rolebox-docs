@@ -4,6 +4,7 @@ import { defineConfig } from "vitepress"
 export default withMermaid(
   defineConfig({
     lang: "zh-CN",
+    base: "/rolebox-docs/",
 
     title: "Rolebox",
     description: "AI agent orchestration framework with dispatch, state machines, and multi-agent collaboration",
