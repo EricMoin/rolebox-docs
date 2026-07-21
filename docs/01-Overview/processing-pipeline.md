@@ -32,7 +32,7 @@ flowchart LR
     subgraph Execution[执行与调度]
         L --> M{tool.execute\nbefore/after}
         M --> N[tool.before<br/>参数验证]
-        N --> O[tool 执行<br/>(dispatch/task 等)]
+        N --> O["tool 执行<br/>(dispatch/task 等)"]
         O --> P[tool.after<br/>结果捕获]
         P --> Q[dispatch 引擎<br/>dispatch/core/]
     end
