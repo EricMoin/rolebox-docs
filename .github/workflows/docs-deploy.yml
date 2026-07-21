@@ -1,7 +1,7 @@
 # =============================================================================
 # Deploy VitePress site to GitHub Pages
 #
-# Trigger: manual only (workflow_dispatch)
+# Trigger: push to main or manual (workflow_dispatch)
 # Destination: gh-pages branch
 # Pre-requisites:
 #   1. Repository Settings > Pages > Source: "Deploy from a branch"
@@ -13,6 +13,9 @@
 name: Deploy VitePress site to Pages
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       publish_dir:
@@ -52,7 +55,7 @@ jobs:
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ${{ github.event.inputs.publish_dir }}
+          publish_dir: ${{ github.event.inputs.publish_dir || 'docs/.vitepress/dist' }}
           publish_branch: gh-pages
           force_orphan: true
           user_name: "github-actions[bot]"
