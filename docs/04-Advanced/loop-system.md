@@ -626,7 +626,7 @@ getAdvancingLockState(): { activeLocks: number; staleLocks: number } {
 | **架构模型** | 推链（push-chain）— `LoopCoordinator` + `WorkerDispatch` + `DispatcherAdapter`，由事件驱动而非轮询 |
 | **迭代控制** | 默认 5 轮，硬上限 50 轮，通过 `\|loop:N\|` 或 `\|loop:N,mode\|` 语法指定 |
 | **上下文模式** | `inherit`（默认）— 前一轮摘要作为下一轮种子；`fresh` — 每轮从干净状态开始 |
-| **中断恢复** | 检查点 + `reSubscribeListeners` + 原子重启，支持系统崩溃后恢复 |
+| **中断恢复** | 检查点（子代理执行期间保存的进度快照）+ `reSubscribeListeners` + 原子重启，支持系统崩溃后恢复 |
 | **关键约束** | 轮次间隔 2s、摘要输入上限 8000 字符、单轮超时 900s、重入锁保护 |
 
 ## 引用索引

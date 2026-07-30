@@ -7,7 +7,7 @@ description: 错误处理策略 — rolebox 的错误容忍机制、降级行为
 
 > **相关文档：** [恢复系统](/03-Reference/recovery-system) — 恢复系统详细架构 | [调度配置](/03-Reference/dispatch-config) — 并发与预算配置 | [已知限制](/03-Reference/limitations) — 当前版本限制
 
-rolebox 采用**错误容忍（fault-tolerant）**设计原则：单个组件的故障不会导致整个系统崩溃。以下是各场景下的降级行为汇总。
+rolebox 采用**错误容忍（fault-tolerant）**设计原则：单个组件的故障不会导致整个系统崩溃。遇到问题时，相关能力会**服务降级**（service degradation）——即该组件被标记为不可用并跳过，其余功能继续运行——而不是让整个系统停摆。以下是各场景下的降级行为汇总。
 
 ## 降级行为一览
 
@@ -25,11 +25,11 @@ rolebox 采用**错误容忍（fault-tolerant）**设计原则：单个组件的
 
 ## 快速参考：我应该配置哪个恢复策略
 
-根据你遇到的错误类型，以下表格推荐默认策略链。所有策略名称均来自内置注册表（`src/recovery/config.ts:88-96`），可直接用于 `role.yaml` 的 `hooks.recovery` 配置块。
+**恢复策略**（recovery strategy）就是错误发生时系统自动执行的补救动作；把多个策略按顺序串起来就是**策略链**（strategy chain）。根据你遇到的错误类型，以下表格推荐默认策略链。所有策略名称均来自内置注册表（`src/recovery/config.ts:88-96`），可直接用于 `role.yaml` 的 `hooks.recovery` 配置块。
 
 | 症状 | 建议策略链 | 说明 |
 |------|-----------|------|
-| **API 500 / 网络超时 / 服务端错误** | `retry(2次, 指数退避)` → `compact` → `abort` | 使用 `session_error` 默认链。前两次重试指数退避，然后压缩会话上下文，最后中止 |
+| **API（应用程序接口，Application Programming Interface）500 / 网络超时 / 服务端错误** | `retry(2次, 指数退避)` → `compact` → `abort` | 使用 `session_error` 默认链。前两次重试指数退避，然后压缩会话上下文，最后中止 |
 | **Token 超限（context_length_exceeded）** | `truncate(最多8次, 50%压缩)` → `summarize` → `abort` | 使用 `context_window` 默认链。先截断输出，再尝试总结压缩，均失败则中止 |
 | **Edit 错误（oldString not found / multiple matches / same content）** | `remind_and_retry(2次)` | 使用 `edit_error` 默认链。注入提示让模型重新读取文件再重试 |
 | **JSON 解析错误（unexpected token / invalid json）** | `remind_and_retry(2次)` | 使用 `json_error` 默认链。注入修复提示后重试 |
@@ -64,6 +64,8 @@ rolebox 采用**错误容忍（fault-tolerant）**设计原则：单个组件的
 
 ### 错误检测
 
+**错误检测**（error detection）就是"先判断这次错在哪儿"——把原始错误归类到某个错误类别（超时、token 超限、编辑失败等），这样才知道该走哪条策略链。
+
 `PatternRegistry`（`src/recovery/error-detection.ts:6-57`）维护一组 `ErrorPattern`（`src/recovery/types.ts:192-203`），每个模式通过 `match(error)` 方法判断是否匹配。系统内置 7 个默认错误模式（`src/recovery/error-detection.ts:90-297`）：
 
 | 模式名称 | 所属类别 | 匹配条件 |
@@ -89,6 +91,16 @@ rolebox 采用**错误容忍（fault-tolerant）**设计原则：单个组件的
 | `truncate` | `src/recovery/strategies/truncate-strategy.ts` | 注入截断指令，要求模型将输出减少到指定的 `target_ratio` |
 | `summarize` | `src/recovery/strategies/summarize-strategy.ts` | 注入总结指令或调用 API 进行上下文压缩 |
 | `abort` | `src/recovery/strategies/abort-strategy.ts` | 最终策略：注入中止消息并终止恢复链 |
+
+::: tip 这些策略各解决什么问题？
+- `retry`（重试）——应对临时性故障（网络抖动、服务端 5xx），等一会儿再试。
+- `compact`（压缩上下文）——会话历史太长、快撑爆上下文窗口时，把历史压一压再继续。
+- `fallback_model`（备用模型）——当前模型不可用或持续出错时，换一个模型再问一次。
+- `remind_and_retry`（提示重试）——模型输出格式不对（如编辑或 JSON 语法错误）时，提示它改正后再试。
+- `truncate`（截断）——输出太长超出窗口时，要求模型把输出写短一些。
+- `summarize`（总结）——上下文太占空间时，先总结成摘要再继续。
+- `abort`（中止）——以上手段都失败时，明确告诉模型"放弃"，而不是静默卡住。
+:::
 
 ### 策略链 (Strategy Chain)
 
@@ -218,9 +230,9 @@ Request cost budget exhausted: 0.52 >= 0.5
 Session input token budget exhausted: 52410 >= 50000
 ```
 
-预算超限的任务会被自动取消，并在下次轮询时记录到指标中。这些限制通过 `role.yaml` 的 `dispatch:` 块中以下字段配置：
-- `maxInputTokensPerRequest` / `maxOutputTokensPerRequest` / `maxCostPerRequest`
-- `maxInputTokensPerSession` / `maxCostPerSession`
+预算超限的任务会被自动取消，并在下次轮询时记录到指标中。
+
+> **注意：** 这些预算限制字段（`maxInputTokensPerRequest` / `maxOutputTokensPerRequest` / `maxCostPerRequest` / `maxInputTokensPerSession` / `maxCostPerSession`）**不属于** `role.yaml` 的 `dispatch:` 块——解析器只接受 11 个并发 / 队列 / 背压 / 超时字段，预算字段会被静默忽略。它们定义在 `DispatchManagerConfig`（`src/dispatch/config.ts:153-163`），必须通过编程式 `configOverrides` 注入 `createDispatchManager`（`src/dispatch/factory.ts:134-136`）。详见[调度配置](./dispatch-config#预算配置编程式)。
 
 ## 按角色配置恢复策略
 

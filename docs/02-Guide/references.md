@@ -7,7 +7,7 @@ description: 引用（Reference）文档系统 — 自动发现、显式声明�
 
 > **相关文档：** [技能系统](/02-Guide/skills) — 按需加载的知识模块系统 | [编写技能](/02-Guide/authoring-skills) — 技能引用声明与自动发现 | [创建角色](/02-Guide/create-a-role) — 完整的角色创建指南
 
-引用（Reference）是代理可以按需读取以获取上下文信息的深度知识文档。与技能（指令集）不同，引用提供原始领域知识 — 理论、规范、指南等。
+引用（Reference）是代理可以按需读取以获取上下文信息的深度知识文档。与技能（指令集）不同，引用提供原始领域知识——理论、规范、指南等。它们同样遵循"渐进式披露（progressive disclosure）"：系统提示只列出引用的名称和描述，代理真正需要时才读取完整内容。
 
 ## 为什么 References 重要
 
@@ -56,7 +56,7 @@ my-role/
 frontmatter.description（存在时）→ deriveDescriptionFromName(name) → 空字符串
 ```
 
-1. **YAML frontmatter**（`extractFrontmatterDescription`，第 46-91 行）：读取文件内容，解析 `---` 包裹的 YAML，提取 `description` 字段。结果缓存在模块级 `descriptionCache` 中避免重复读取
+1. **YAML frontmatter**（即 Markdown 文件顶部用 `---` 包裹的元数据块；`extractFrontmatterDescription`，第 46-91 行）：读取文件内容，解析 `---` 包裹的 YAML，提取 `description` 字段。结果缓存在模块级 `descriptionCache` 中避免重复读取
 2. **自动推导**（`deriveDescriptionFromName`，第 32-37 行）：将文件名中的连字符/下划线替换为空格，首字母大写。例如 `"core-principles"` → `"Core Principles"`
 3. **回退**：如果前述均不可用，描述为空字符串
 
@@ -188,7 +188,7 @@ references:
 | **典型容量** | 数百行，不直接进入系统提示 | < 100 行（过长会稀释提示词） | < 50 行，聚焦单一职责 |
 
 **选择建议：**
-- 需要代理**了解但不一定执行**的知识 → **引用**（如 API 规范、架构文档）
+- 需要代理**了解但不一定执行**的知识 → **引用**（如 API（应用程序接口，Application Programming Interface）规范、架构文档）
 - 需要代理**按步骤执行**的操作指南 → **技能**（如代码审查清单、发布流程）
 - 需要用户**主动切换**的行为模式 → **函数**（如 `|review|` 进入审查模式）
 

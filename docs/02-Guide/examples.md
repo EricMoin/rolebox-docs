@@ -128,7 +128,7 @@ subagents:
 team-lead 是"委派模式"的原型。父角色接收任务，判断哪个子代理适合处理，然后通过 `dispatch` 工具委派。子代理在其自身 prompt 下执行，完成后将结果返回给父角色。关于 dispatch 的完整机制，参见[子代理](/02-Guide/subagents)和[调度配置](/03-Reference/dispatch-config)。
 
 **参考链接：**
-- [子代理](/02-Guide/subagents) — 内联声明、字段继承、dispatch API
+- [子代理](/02-Guide/subagents) — 内联声明、字段继承、dispatch API（应用程序接口，Application Programming Interface）
 - [协作图](/02-Guide/collaboration-graph) — 当需要结构化工作流时升级到此模式
 
 ### 自定义 Hook（hooks）
@@ -187,6 +187,14 @@ subagents:
 ```
 
 不同之处仅在于 `collaboration` 块——反映出 rolebox 的核心理念：**结构从配置中涌现，而非代码**。
+
+::: tip Review Team 系列用到的一些术语
+- **拓扑（topology）**：协作图的预设结构模式——pipeline（串行）、review-loop（循环）、star（并行）。
+- **max_iterations**：循环最大轮数上限，防止死循环。
+- **result_matches**：终止条件，当指定代理的输出匹配某种模式（如包含 "APPROVED"）时停止循环。
+- **converged**：终止条件，由 LLM（大语言模型，Large Language Model）法官判断状态是否收敛。
+- **stuck**：终止条件，同一代理连续 N 次产生相同输出（死锁检测）时停止循环。
+:::
 
 ### review-team（基础版）
 

@@ -18,7 +18,7 @@ description: 跨会话、跨角色持久知识系统的实现策略文档 — �
 | 4 个工具接口 | §4 工具 | [记忆系统 → 工具参考](/04-Advanced/memory-system#工具参考) | memory_write/recall/list/update |
 | `\|memory\|` 函数 | §5 函数 | [记忆系统 → 合并回顾](/04-Advanced/memory-system#2-合并回顾-consolidation) | 合并回顾的激活语法 |
 | 系统提示注入 | §6 注入 | [记忆系统 → 注入机制](/04-Advanced/memory-system#注入机制) | `<available_memory>` 块配置 |
-| CLI 命令 | §9 CLI | [CLI 参考 → memory](/03-Reference/cli#memory-subcommand) | 命令行管理 |
+| CLI（命令行界面，Command-Line Interface）命令 | §9 CLI | [CLI 参考 → memory](/03-Reference/cli#memory-subcommand) | 命令行管理 |
 | 容量管理与 LRU 淘汰 | §10 容量管理 | [记忆系统 → 清理与淘汰机制](/04-Advanced/memory-system#清理与淘汰机制) | 淘汰策略与环境变量 |
 | 配置类型定义 | §7 类型 | [role.yaml 参考](/03-Reference/role-yaml) | MemoryConfig 接口 |
 :::
@@ -69,7 +69,7 @@ Markdown files work well for static references and skills — they are human-rea
 
 | Requirement | Markdown | SQLite |
 |---|---|---|
-| Full-text search with ranking | Manual grep, no ranking | FTS5 with BM25 ranking |
+| Full-text search with ranking | Manual grep, no ranking | FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5）with BM25（一种经典全文检索相关性排序算法）ranking |
 | Multi-dimensional filtering (scope + category + relevance + tags) | Ad-hoc path conventions | Native WHERE clauses |
 | Capacity eviction by access recency | Custom script per project | ORDER BY accessed_at + LIMIT |
 | Deduplication on write | Grep + parse all files | PRIMARY KEY + ON CONFLICT |
@@ -87,7 +87,7 @@ Bun ships `bun:sqlite` natively — zero additional dependencies.
 └── memory.db          # SQLite single file, WAL mode
 ```
 
-A new function `memoryDbPath(dir)` in `src/state-paths.ts` derives the path:
+A new function `memoryDbPath(dir)` in `src/utils/state-paths.ts` derives the path:
 
 ```typescript
 export function memoryDbPath(dir: string): string {
@@ -95,7 +95,7 @@ export function memoryDbPath(dir: string): string {
 }
 ```
 
-This follows the existing `stateDirFor(dir)` pattern — a single source of truth so the read side (CLI) and write side (MemoryStore) cannot drift apart.
+This follows the existing `stateDirFor(dir)` pattern — a single source of truth so the read side (CLI 命令行界面，Command-Line Interface) and write side (MemoryStore) cannot drift apart.
 
 ### 3.3 SQLite Schema
 
@@ -251,7 +251,7 @@ export class MemoryStore {
 
 ## 4. Tools (Built-in, Available to All Roles)
 
-Four tools registered in the `tool:` object of `src/plugin-hooks.ts` alongside existing dispatch and session tools.
+Four tools registered in the `tools` object of `src/platform/tool-assembly.ts`（`buildCanonicalTools`，`:85-87` 注册 `memory_write`/`memory_recall`/`memory_list`；`memory_update` 由 `src/core/services/tool-service.ts:93` 单独注册，为 OpenCode 专属）alongside dispatch and session tools.
 
 ### 4.1 `memory_write`
 
@@ -392,7 +392,7 @@ export function createMemoryUpdateTool() {
 }
 ```
 
-### 4.5 Tool Registration in `src/plugin-hooks.ts`
+### 4.5 Tool Registration（实际：`src/platform/tool-assembly.ts` + `src/core/services/tool-service.ts`）
 
 ```typescript
 import {
@@ -402,7 +402,8 @@ import {
   createMemoryUpdateTool,
 } from "./memory/tools.ts";
 
-// Inside createPluginHooks, in the tools object:
+// 说明：下列代码为示意。实际注册位于 buildCanonicalTools（src/platform/tool-assembly.ts）
+// 与 src/core/services/tool-service.ts（memory_update，OpenCode 专属）。
 const tools = {
   // ... existing tools ...
   memory_write: createMemoryWriteTool(),
@@ -465,7 +466,7 @@ The function body instructs the agent to:
 |memory:session:abc123|  # Only specific session
 ```
 
-Positional parameters map to the `params` declaration order (`scope`), following the same colon-delimited syntax as `|plan|`, `|loop:3|`, etc. The parameter values (`full`, `recent`, `session:abc123`) are passed into the function content via the existing `applyParams` mechanism in `src/function-resolver.ts`.
+Positional parameters map to the `params` declaration order (`scope`), following the same colon-delimited syntax as `|plan|`, `|loop:3|`, etc. The parameter values (`full`, `recent`, `session:abc123`) are passed into the function content via the existing `applyParams` mechanism in `src/function/file-resolver.ts:116`.
 
 ### 5.4 Resolution Priority
 
@@ -475,7 +476,7 @@ Follows the standard rolebox function resolution order (same as all other functi
 2. `~/.config/opencode/functions/memory.md` — global user-defined
 3. Built-in `functions/memory.md` shipped with rolebox
 
-This is enforced by `resolveFunctions()` in `src/function-resolver.ts` with zero changes — it already checks role-local → global → built-in.
+This is enforced by `resolveFunctions()` in `src/function/file-resolver.ts:25` with zero changes — it already checks role-local → global → built-in.
 
 ---
 
@@ -485,7 +486,7 @@ This is enforced by `resolveFunctions()` in `src/function-resolver.ts` with zero
 
 At session start, inject a `<available_memory>` block listing memory summaries — same pattern as `buildReferenceBlock` and `buildSkillBlock`.
 
-New function in `src/prompt-builder.ts`:
+New function in `src/prompt/builder.ts`（`buildMemoryBlock` 实现在 `src/prompt/builder.ts:145`）:
 
 ```typescript
 import type { MemorySummary } from "./types.ts";
@@ -646,7 +647,7 @@ export interface RoleConfig {
 src/memory/
 ├── store.ts           — MemoryStore class (SQLite CRUD + FTS, WAL mode)
 ├── tools.ts           — 4 tool creation functions (memory_write, memory_recall, memory_list, memory_update)
-├── inject.ts          — buildMemoryBlock + injection logic (optional: extracted from prompt-builder.ts)
+├── inject.ts          — buildMemoryBlock + injection logic（规划文件，未创建；块构建实际在 src/prompt/builder.ts:145，注入逻辑在 src/hooks/system-transform.ts）
 └── types.ts           — MemoryConfig, MemoryEntry, MemorySummary (or add to src/types.ts)
 
 functions/
@@ -656,12 +657,12 @@ tests/memory/
 ├── store.test.ts      — SQLite CRUD, FTS search, capacity management, concurrent access
 └── tools.test.ts      — Tool tests with mock MemoryStore
 
-src/state-paths.ts     — Add memoryDbPath(dir) function
-src/prompt-builder.ts  — Add buildMemoryBlock()
-src/types.ts           — Add MemoryConfig, MemoryEntry, MemorySummary; add memory to RoleConfig
-src/hooks/deps.ts      — Add roleMap: Map<string, ResolvedRole>
+src/utils/state-paths.ts     — Add memoryDbPath(dir) function（实现在 :47）
+src/prompt/builder.ts        — Add buildMemoryBlock()（实现在 :145）
+src/types.ts                 — Add MemoryConfig, MemoryEntry, MemorySummary; add memory to RoleConfig
+src/hooks/deps.ts            — Add roleMap: Map<string, ResolvedRole>
 src/hooks/system-transform.ts — Add memory injection block
-src/plugin-hooks.ts    — Register 4 memory tools, populate roleMap in deps
+src/platform/tool-assembly.ts — Register memory tools（memory_write/recall/list 在 :85-87）；memory_update 在 src/core/services/tool-service.ts:93
 ```
 
 ---
@@ -741,7 +742,7 @@ The eviction mechanism keeps the database bounded and relevant:
 
 ### Phase 1: Core Storage
 
-**Subtask 1** — Add `memoryDbPath()` to `src/state-paths.ts`.
+**Subtask 1** — Add `memoryDbPath()` to `src/utils/state-paths.ts`.
 
 **Subtask 2** — Implement `src/memory/store.ts`:
 - `MemoryStore` class with constructor, `ensureSchema()`, schema DDL
@@ -760,13 +761,13 @@ The eviction mechanism keeps the database bounded and relevant:
 - `createMemoryListTool` — filtered/sorted listing
 - `createMemoryUpdateTool` — partial field merge
 
-**Subtask 5** — Wire tools into `src/plugin-hooks.ts`:
+**Subtask 5** — Wire tools into `src/platform/tool-assembly.ts`（`buildCanonicalTools`）:
 - Import 4 tool creators
 - Register in the `tools` object alongside existing dispatch/session tools
 
 ### Phase 3: Injection
 
-**Subtask 6** — Implement `buildMemoryBlock()` in `src/prompt-builder.ts`:
+**Subtask 6** — Implement `buildMemoryBlock()` in `src/prompt/builder.ts`:
 - Format `<available_memory>` XML block with summaries
 - Follow same pattern as `buildReferenceBlock`, `buildSkillBlock`
 
@@ -863,11 +864,11 @@ The eviction mechanism keeps the database bounded and relevant:
 | FTS5 搜索 | BM25 排序 | ✅ 按计划实现 | `src/memory/search.ts` — FTS5 MATCH 查询 |
 | 4 个工具 | memory_write/recall/list/update | ✅ 按计划实现 | `src/memory/tools.ts` — 4 个工具创建函数 |
 | `\|memory\|` 函数 | functions/memory.md 内置函数 | ✅ 按计划实现 | 合并回顾功能可用 |
-| 系统提示注入 | `<available_memory>` 块 | ✅ 按计划实现 | `src/memory/inject.ts` 注入逻辑 |
+| 系统提示注入 | `<available_memory>` 块 | ✅ 按计划实现 | 注入逻辑在 `src/hooks/system-transform.ts`；块构建在 `src/prompt/builder.ts:145`（`buildMemoryBlock`）；`src/memory/inject.ts` 未创建 |
 | CLI 子命令 | 7 个子命令 (list/show/search/delete/export/clean/stats) | ✅ 基本实现 | `src/cli/commands/memory/` 目录 |
 | 配置注入 | `role.yaml` 中 `memory` 块 | ✅ 按计划实现 | RoleConfig.memory 字段 |
 | 自动容量管理 | `ROLEBOX_MEMORY_MAX_ENTRIES` 环境变量 | ⚠️ 当前通过 CLI 手动清理 | 自动 LRU 淘汰为未来计划 |
-| memoryDbPath() | `src/state-paths.ts` 新增函数 | ✅ 按计划实现 | 单一真实来源的路径推导 |
+| memoryDbPath() | `src/utils/state-paths.ts:47` 新增函数 | ✅ 按计划实现 | 单一真实来源的路径推导 |
 
 > **注意：** 上述状态基于源码验证。各子系统的具体实现细节可能因版本迭代而持续变化，以实际运行版本为准。
 
@@ -911,9 +912,9 @@ The eviction mechanism keeps the database bounded and relevant:
 
 ## 15. Acceptance Criteria
 
-1. **4 memory tools** registered in `src/plugin-hooks.ts`: `memory_write`, `memory_recall`, `memory_list`, `memory_update`
+1. **4 memory tools** registered — `memory_write`/`memory_recall`/`memory_list` in `src/platform/tool-assembly.ts:85-87`, `memory_update` in `src/core/services/tool-service.ts:93`: `memory_write`, `memory_recall`, `memory_list`, `memory_update`
 2. **`\|memory\|` function file** exists at `functions/memory.md` with correct frontmatter and consolidation instructions
-3. **`<available_memory>` block** injected at session start when `memory.inject !== false`, using `buildMemoryBlock()` in `src/prompt-builder.ts`
+3. **`<available_memory>` block** injected at session start when `memory.inject !== false`, using `buildMemoryBlock()` in `src/prompt/builder.ts:145`
 4. **`tsc --noEmit`** passes with zero errors
 5. **`bun test tests/memory/`** passes (store.test.ts + tools.test.ts, minimum 20+ test cases)
 6. **SQLite DB** created at `.rolebox/memory.db` with correct schema (WAL mode, FTS5, indexes, triggers)
@@ -922,7 +923,7 @@ The eviction mechanism keeps the database bounded and relevant:
 9. **Memory config** parsed from `role.yaml` with correct defaults (`inject: true`, `max_inject: 10`, `min_relevance: medium`, `scope: both`)
 10. **No regression** in existing tests: `bun test tests/dispatch/`, `bun test tests/session/`, `bun test tests/plugin-hooks.test.ts` all pass
 11. **MemoryStore** uses the same logging pattern: `import { createSubLogger } from "../logger.ts"; const log = createSubLogger("memory:store");`
-12. **`memoryDbPath(dir)`** function added to `src/state-paths.ts` for single-source-of-truth path derivation
+12. **`memoryDbPath(dir)`** function added to `src/utils/state-paths.ts:47` for single-source-of-truth path derivation
 
 
 ## 下一步

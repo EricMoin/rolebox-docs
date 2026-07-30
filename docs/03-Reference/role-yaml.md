@@ -7,7 +7,19 @@ description: role.yaml 完整字段参考 — 必需字段、可选字段、技�
 
 > **相关文档：** [创建角色](/02-Guide/create-a-role) — 角色创建指南 | [调度配置](/03-Reference/dispatch-config) — dispatch 块配置 | [函数系统](/02-Guide/functions) — 函数声明与状态机
 
-本文档是角色 `role.yaml` 文件的完整字段参考。
+每个角色在 rolebox 里都对应一份 `role.yaml` 文件：它告诉系统这个角色是谁、能做什么、用什么模型、拥有哪些工具和协作方式。本文档就是这份文件的完整字段参考——无论你要新建角色还是调整现有角色，按字段对照这里的定义即可。
+
+::: tip 术语速览
+本文档会用到几个核心概念，先快速认识它们：
+- **调度/派发（dispatch）** — 把一个角色的任务分派给子代理去执行的过程。
+- **Hook（挂钩）** — 在特定生命周期事件（如发消息、工具执行前后）触发并注入自定义逻辑的机制。
+- **协作图（collaboration）** — 描述多个代理"谁把工作传给谁"的有向图。
+- **拓扑（topology）** — 协作图的预设结构模式：pipeline（串行）、review-loop（循环）、star（并行）。
+- **终止条件（termination）** — 决定协作图循环何时停止执行的条件。
+- **扩展点（extension point）** — rolebox 预留给自定义模块接入的扩展位置。
+- **注册中心（registry）** — 用于发布和分发角色的 GitHub 仓库。
+- **函数状态机（FSM，有限状态机 Finite State Machine）** — 把函数的激活/停用建模成有限状态间的切换。
+:::
 
 ::: info
 `functions:` 字段的行为与直觉相反：它不会替换默认函数，而是**合并**内置的 `[plan, execute, loop]`。如果你只想添加自定义函数而不保留某些内置函数，必须同时使用 `disable_functions` 字段显式移除。
@@ -86,12 +98,6 @@ dispatch:
   syncReservedSlots: number         # 预留给同步调度的槽位数（默认：1）
   maxActivePerParent: number        # 每个父会话最大活跃任务数（默认：3）
   maxTotalSessionsPerRequest: number # 每次用户请求最大累积会话数（默认：无限制 / 按需启用）
-  maxInputTokensPerRequest: number  # 每次请求最大累积输入 token 数（默认：无限制 / 按需启用）
-  maxOutputTokensPerRequest: number # 每次请求最大累积输出 token 数（默认：无限制 / 按需启用）
-  maxCostPerRequest: number         # 每次请求最大累积费用（USD）（默认：无限制 / 按需启用）
-  maxInputTokensPerSession: number  # 每个调度会话最大输入 token 数（默认：无限制 / 按需启用）
-  maxCostPerSession: number         # 每个调度会话最大费用（USD）（默认：无限制 / 按需启用）
-  budgetSampleIntervalMs: number    # 预算采样间隔（毫秒）（默认：30000）
   backgroundStaleTimeoutMs: number  # 后台任务过期超时（毫秒）（默认：900000）
   syncAcquireTimeoutMs: number      # 同步槽位获取超时（毫秒）（默认：120000）
   syncPromptTimeoutMs: number       # 同步提示词超时（毫秒）（默认：600000）
@@ -99,10 +105,16 @@ dispatch:
   backpressureMaxRetries: number    # 最大背压重试次数（默认：5）
   backpressureMaxDelayMs: number    # 最大背压延迟（毫秒）（默认：60000）
 
+  # 注意：预算字段（maxInputTokensPerRequest / maxOutputTokensPerRequest /
+  # maxCostPerRequest / maxInputTokensPerSession / maxCostPerSession /
+  # budgetSampleIntervalMs）不属于 dispatch 块，需通过编程式 configOverrides 注入。
+
 # 自定义 Hook（详见 Hook 机制）
 hooks:
-  builtin:                          # 启用/禁用内置 Hook
-    auto_activate: true
+  builtin:                          # 启用/禁用恢复型内置 Hook（见 Hook 机制）
+    recovery: true                  # 主开关（默认 true）
+    session_error: true             # 错误恢复类（默认 true）
+    bash_file_read_guard: false     # 护栏类（默认 false）
   custom:
     - name: string                  # Hook 标识符
       description: string           # 可读描述
@@ -144,7 +156,7 @@ tools:
 ### `model`
 - **类型**: `string`（可选）
 - **默认值**: 使用全局默认模型
-- **用途**: 指定该角色使用的 LLM 模型标识符，如 `"gpt-4"`、`"claude-3-sonnet"`。
+- **用途**: 指定该角色使用的大语言模型（LLM，Large Language Model）标识符，如 `"gpt-4"`、`"claude-3-sonnet"`。
 - **何时使用**: 当角色需要特定模型能力（如长上下文、高推理能力）时设置。子代理可以通过 `model` 覆盖父角色的模型。
 
 ### `mode`
@@ -270,16 +282,17 @@ disable_functions:
 
 ### `dispatch`
 - **类型**: `DispatchRoleConfig`（可选）
-- **用途**: 覆盖子代理调度的默认参数（并发、队列、预算等）。其所有字段定义见[调度配置](./dispatch-config)。
+- **用途**: 覆盖子代理调度的默认参数（并发、队列、背压、超时）。注意：预算字段（token / cost 上限、`budgetSampleIntervalMs`）**不属于** `dispatch:` 块，需通过编程式 `configOverrides` 注入 `DispatchManagerConfig`。其所有字段定义见[调度配置](./dispatch-config)。
 - **示例**: 见上方完整 Schema 中的 `dispatch` 块。
 
 ### `hooks`
 - **类型**: `HooksBlock`（可选）
 - **用途**: 声明自定义 Hook 和内置 Hook 开关。Hook 在特定生命周期事件（如 `chat.message`、`tool.execute.before`）触发。
 - **子字段**:
-  - `hooks.builtin`：启用/禁用内置 Hook（如 `auto_activate`）。
+  - `hooks.builtin`：启用/禁用恢复型内置 Hook（`recovery` 主开关 + `session_error`、`edit_error`、`json_error`、`context_window`、`empty_response`、`tool_pair_validation`、`write_existing_file_guard`、`bash_file_read_guard`、`webfetch_redirect_guard`）。
   - `hooks.custom`：声明自定义 Hook 模块。
 - **示例**: 见上方完整 Schema 中的 `hooks` 块。详见 [Hook 机制](./hooks)。
+- **注意**: `auto_activate` 是**顶层字段**，不是 `hooks.builtin` 的键，见下方 `auto_activate` / `locked` 小节。
 
 ### `permission`
 - **类型**: `PermissionConfig`（可选）
@@ -327,7 +340,7 @@ disable_functions:
 
 ### `extensions`
 - **类型**: `ExtensionConfig`（可选）
-- **用途**: 注册自定义扩展模块（条件、拓扑、终止条件、恢复策略、通知通道、观察事件、并发策略等）。详见[扩展机制](./extensions)。
+- **用途**: 注册自定义扩展模块（条件、图拓扑、终止条件、恢复策略、恢复模式、通知通道、通知事件、观察事件、并发策略等 9 种作用域）。详见[扩展机制](./extensions)。
 
 ## 环境变量插值
 

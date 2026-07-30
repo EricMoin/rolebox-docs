@@ -7,7 +7,14 @@ description: 自定义 Hook 参考 — schema、模块接口、HookContext API�
 
 > **相关文档：** [扩展机制](/03-Reference/extensions) — 通过扩展系统注册自定义模块 | [role.yaml 参考](/03-Reference/role-yaml) — Hook 配置字段详解 | [自定义 Hook](/02-Guide/custom-hooks) — Hook 开发实战指南
 
+Hook（挂钩）是 rolebox 提供的一种扩展机制：你可以让自定义代码在特定事件（比如用户发消息、工具执行前后）发生时自动运行，用来检查、修改或记录 agent 的行为。本页是 Hook 的配置与开发参考——先讲怎么在 `role.yaml` 里声明 Hook，再讲如何实现一个 Hook 模块。
+
 Hook 在 `role.yaml` 的 `hooks.custom` 字段中声明，并在两个阶段触发：`before`（在内置处理器之前运行）和 `after`（在内置处理器之后运行）。每个 Hook 独立运行 —— 一个 Hook 的失败不会导致 Agent 崩溃。
+
+::: tip 术语速览
+- **Hook（挂钩）** — 在特定生命周期事件触发时注入自定义逻辑的机制。
+- **API（应用程序接口，Application Programming Interface）** — 软件对外提供的调用接口；本文的 `HookContext API` 指 Hook 上下文对象对外开放的属性与方法。
+:::
 
 ## Schema
 
@@ -259,24 +266,67 @@ hooks:
 
 如果两个 Hook 具有相同的 `priority` 值，它们会按照在 YAML 中的注册顺序执行。
 
-## 内置 Hook 参考
+## 内置 Hook
 
-rolebox 内置了以下 `hooks.builtin` 选项（在 `role.yaml` 的 `hooks:` 块中配置）：
+rolebox 内置两套机制：**核心事件处理器**（始终生效，处理每个事件阶段）与**恢复型内置 Hook**（通过 `hooks.builtin` 开关控制）。
 
-### `auto_activate`
+### 核心事件处理器（始终生效）
 
-启用后，在首次用户消息到达时自动激活角色标记为 `auto_activate` 的函数，而无需用户显式使用 `|function_name|` 语法（`src/hooks/chat-message.ts:82-106`）。触发时机：`chat.message` 事件的处理过程中。
+以下内置处理器对应各生命周期事件，始终注册并运行，**无法**通过 `hooks.builtin` 关闭（注册见 `src/core/services/hook-service.ts:149-244`）：
+
+| 处理器 | 事件 | 源码 |
+|---|---|---|
+| `handleChatMessage` | `chat.message` | `src/hooks/chat-message.ts:16` |
+| `handleToolBefore` | `tool.execute.before` | `src/hooks/tool-before.ts` |
+| `handleToolAfter` | `tool.execute.after` | `src/hooks/tool-after.ts` |
+| `handleSystemTransform` | `experimental.chat.system.transform` | `src/hooks/system-transform.ts` |
+| `handleEvent` | 生命周期事件（`session.idle` 等） | `src/hooks/event-handler.ts` |
+| `handleCompacting` | `experimental.session.compacting` | `src/hooks/compaction.ts` |
+
+它们的执行顺序与自定义 Hook 相同：内置 `before` → 自定义 `before` → 核心逻辑 → 自定义 `after` → 内置 `after`（见上文"执行顺序全景"）。
+
+### 恢复型内置 Hook（`hooks.builtin` 开关）
+
+`hooks.builtin` 块控制 **9 个恢复型内置 Hook** 及主开关 `recovery`（默认 `true`）。每个开关对应一个 `configKey`；显式设为 `false` 即禁用对应 Hook（`src/recovery/builtin/registry.ts:19-35`、`src/core/services/recovery-service.ts:53-85`）：
+
+| `hooks.builtin` 键 | 内置 Hook | 触发事件 | 阶段 | 默认 |
+|---|---|---|---|---|
+| `recovery`（主开关） | — | — | — | `true` |
+| `session_error` | session-error-recovery | `event`（`session.error`） | after | `true` |
+| `edit_error` | edit-error-recovery | `tool.execute.after` | after | `true` |
+| `json_error` | json-error-recovery | `tool.execute.after` | after | `true` |
+| `context_window` | context-window-monitor | `tool.execute.after` / `event` | after | `true` |
+| `empty_response` | empty-response-detector | `tool.execute.after` | after | `true` |
+| `tool_pair_validation` | tool-pair-validator | `system.transform` | after | `false` |
+| `write_existing_file_guard` | write-existing-file-guard | `tool.execute.before` | before | `false` |
+| `bash_file_read_guard` | bash-file-read-guard | `tool.execute.before` | before | `false` |
+| `webfetch_redirect_guard` | webfetch-redirect-guard | `tool.execute.after` | after | `false` |
+
+**默认策略（`src/core/services/recovery-service.ts:53-83`）：** 错误恢复类 Hook（`session_error`、`edit_error`、`json_error`、`context_window`、`empty_response`）默认开启；护栏类 Hook（`tool_pair_validation`、`write_existing_file_guard`、`bash_file_read_guard`、`webfetch_redirect_guard`）默认关闭。主开关 `recovery: false` 会禁用整个恢复引擎及全部恢复型内置 Hook。
 
 ```yaml
 hooks:
   builtin:
-    auto_activate: true      # 启用函数自动激活
+    recovery: true               # 主开关（默认 true）
+    session_error: true          # 错误恢复类（默认 true）
+    bash_file_read_guard: false  # 护栏类（默认 false）
+    # ... 可覆盖上表中任意 configKey
 ```
 
-当 `auto_activate` 启用时：
-1. 系统会在第一条用户消息到达时检查角色的 `auto_activate` 列表。
-2. 匹配的函数自动进入活跃状态，无需手动调用。
-3. 如果函数还配置了 `locked: true`，这些自动激活的函数无法通过后续的转换或用户请求停用。
+### `auto_activate` 不是 `hooks.builtin` 键
+
+`auto_activate` **不是** `hooks.builtin` 的可开关项，而是 `role.yaml` 的**顶层字段**（`src/types.core.ts:76`），取值为函数名数组：
+
+```yaml
+# role.yaml 顶层字段
+auto_activate:
+  - security-guard
+locked: true     # 可选：锁定自动激活的函数，使其无法被停用
+```
+
+首条用户消息到达时，`chat.message` 处理器检查当前代理的 `auto_activate` 列表并自动激活匹配的函数（`src/hooks/chat-message.ts:98-122`）；`roleAutoActivateMap` / `roleLockedMap` 在 Hook 服务初始化时从 `role.config.auto_activate` 与 `locked` 填充（`src/core/services/hook-service.ts:67-77`）。
+
+不要在 `hooks.builtin` 中写 `auto_activate`——该键不会被解析，会被静默忽略。
 
 ## `inject()` 机制详解
 
@@ -302,7 +352,7 @@ function appendCorrection(
 
 - **Hook 不会导致 Agent 崩溃**。每个 Hook 处理器都用 try/catch 包裹 —— 失败时记录警告并继续执行。
 - `inject()` 机制通过已有的 `appendCorrection` 系统向下一个系统提示词追加内容，与内置护栏使用相同的通道。
-- 模块加载失败（文件缺失、语法错误）会被记录日志，该 Hook 会被跳过 —— 注册中心存储 `null` 并继续运行。
+- 模块加载失败（文件缺失、语法错误）会被记录日志，该 Hook 会被跳过 —— 注册中心（此处指登记 Hook 模块的容器）存储 `null` 并继续运行。
 
 ::: warning Hook 模块隔离
 每个自定义 Hook 模块运行在独立的模块作用域中。一个 Hook 的全局状态不会自动与其他 Hook 共享。如果需要跨 Hook 通信，应使用 `config` 字段传递参数，或将共享状态持久化到文件或内存中合适的全局 Map（仅用于同进程通信，不建议依赖跨进程的共享状态）。

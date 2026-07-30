@@ -7,7 +7,7 @@ description: 函数（Function）系统 — 内置 plan/execute/loop 函数、�
 
 > **相关文档：** [编写函数](/02-Guide/writing-functions) — 自定义函数开发指南 | [技能系统](/02-Guide/skills) — 按需加载的知识模块 | [子代理](/02-Guide/subagents) — 函数与 dispatch 的协作
 
-函数（Function）是可组合的行为模块，用户通过 `|名称|` 语法在运行时激活。它们会按需向系统提示中注入额外的指令。
+函数（Function）是可组合的行为模块——可以理解为一段段"随用随取"的指令。用户在消息前加一个 `|名称|` 前缀（激活语法）即可在运行时激活某个函数；激活后，函数的指令会按需注入系统提示。
 
 每个角色默认搭载三个内置函数（`plan`、`execute`、`loop`，定义于 `src/constants.ts:76`）。用户通过在消息前加前缀来激活它们：
 
@@ -16,6 +16,14 @@ description: 函数（Function）系统 — 内置 plan/execute/loop 函数、�
 |execute| 实现我们讨论过的重构
 |plan|execute| 为 API 添加分页功能
 ```
+
+::: tip 函数相关术语
+- **激活语法 `|名称|`**：在消息前加 `|plan|`、`|execute|` 这样的前缀，即可在运行时激活对应函数。
+- **函数状态机（FSM，有限状态机，Finite State Machine）**：驱动函数在 active（活跃）/ gated（等待条件）/ complete（完成）等状态间转换的模型。
+- **gate（门控）**：函数满足特定条件（如"plan 制品已存在"）后才被激活的机制；未满足前函数保持 gated 状态。
+- **transitions（转换）**：定义当某条件满足时激活或停用其它函数的规则，用于跨函数编排。
+- **continue_until**：自动延续条件，满足后函数标记为 complete 并停止自动延续。
+:::
 
 ## 工作原理
 
@@ -72,17 +80,17 @@ Check for:
 
 1. `{roleDir}/functions/{name}.md` — 角色本地覆盖
 2. `~/.config/opencode/functions/{name}.md` — 全局用户定义
-3. 内置（`plan`、`execute`）— rolebox 自带
+3. 内置（`plan`、`execute`、`loop`）— rolebox 自带
 
 ### 解析算法
 
-解析器（`src/resolver/function-resolver.ts`）按以下优先级搜索：
+解析器 `resolveFunctions()`（`src/function/file-resolver.ts:25`）按以下优先级搜索；函数名集合由 `src/resolver/orchestrator.ts:216-218` 合并并过滤（`[...DEFAULT_FUNCTIONS, ...(config.functions ?? [])]` 再排除 `disable_functions`）：
 
 1. `{roleDir}/functions/{name}.md` — 角色本地覆盖（`FunctionSource.RoleLocal`）
 2. `~/.config/opencode/functions/{name}.md` — 全局用户定义（`FunctionSource.Global`）
 3. 内置（`plan`、`execute`、`loop`）— rolebox 自带（`FunctionSource.BuiltIn`）
 
-内置函数定义于 `src/constants.ts:76`：
+`FunctionSource` 枚举定义于 `src/constants.ts:27-33`；内置函数定义于 `src/constants.ts:76`：
 
 ```typescript
 export const DEFAULT_FUNCTIONS: readonly string[] = ["plan", "execute", "loop"];
@@ -337,11 +345,11 @@ rolebox info my-role
 
 ## 内置函数
 
-**plan** — 指示代理在制定计划前用工具（Read、Grep、Glob、LSP）调查代码库。生成带有验证策略的结构化计划，等待用户批准后再执行。
+**plan** — 指示代理在制定计划前用工具（Read、Grep、Glob、LSP（语言服务器协议，Language Server Protocol））调查代码库。生成带有验证策略的结构化计划，等待用户批准后再执行。
 
 **execute** — 指示代理逐步实现，每次修改后通过工具验证（lsp_diagnostics、构建、测试）。采用两次尝试升级策略处理故障。
 
-**loop** — 在隔离的 worker 会话中重复运行同一任务。原始会话成为纯粹的编排器：它确认激活，通过 dispatch 系统将每一轮派发到子 worker，并在轮次完成时生成面向用户的摘要。编排器本身永远不执行任务。
+**loop** — 在隔离的 worker 会话中重复运行同一任务。原始会话成为纯粹的编排器（orchestrator，即顶层 AI 编排角色：只负责拆解、派发与汇总，自己不执行具体工作）：它确认激活，通过 dispatch 系统将每一轮派发到子 worker，并在轮次完成时生成面向用户的摘要。编排器本身永远不执行任务。
 
 ```
 |loop| 重构 utils 模块          # 5 轮（默认），inherit 模式
@@ -354,7 +362,7 @@ rolebox info my-role
 1. 每一轮（包括第一轮）都在通过 dispatch 系统派发的全新子 worker 会话中执行
 2. 原始会话是纯粹的编排器/观察者。它确认激活，每个完成的轮次生成一个面向用户的摘要，从不执行任务
 3. 每轮的摘要成为下一轮的种子上下文（`inherit` 模式），创建自包含的上下文链
-4. 迭代计数控制停止，没有 LLM 提前停止机制
+4. 迭代计数控制停止，没有 LLM（大语言模型，Large Language Model）提前停止机制
 
 **模式：**
 
@@ -550,7 +558,7 @@ functions:
 
 每轮完全独立，不获之前轮次的上下文（`functions.md:289`）。适合并行测试或对比不同策略的效果。
 
-**使用检查点与 loop 组合：**
+**使用检查点（checkpoint，子代理执行期间保存的进度快照，重试时可注入）与 loop 组合：**
 
 结合 `dispatch_checkpoint`（`subagents.md:256-266`），loop 可以在超时或中断后恢复：
 

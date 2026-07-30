@@ -27,7 +27,7 @@ description: 10 工具会话管理套件的实现策略文档 — 架构概览�
 | `session_timeline` | — | ⏳ 推迟 | — |
 | `session_link` | — | ⏳ 推迟 | — |
 
-> 实际工具注册见 `src/platform/tool-assembly.ts:100-109`。推迟的工具将在未来版本中评估。
+> 实际工具注册见 `src/platform/tool-assembly.ts:107-112`（`session_list`/`session_search`/`session_read`/`session_info`/`session_diff`/`session_fork`）。推迟的工具将在未来版本中评估。
 :::
 
 # Session Tools Suite — Implementation Strategy
@@ -59,9 +59,11 @@ tests/session/
   linking.test.ts   — Unit tests for link persistence
 ```
 
+> **说明：** 上表为 2026-07-03 的规划结构。实际落地仅 `src/session/{types.ts, tools.ts, session-browse-tools.ts, session-inspect-tools.ts, tool-helpers.ts, client.ts}`；`analytics.ts`/`export.ts`/`search.ts`/`linking.ts` 均未实现（见「What Changed Since This Strategy」）。
+
 ### 1.2 Integration Point
 
-In `src/plugin-hooks.ts`, add to the `tool:` object alongside dispatch tools:
+In `src/platform/tool-assembly.ts`, add to the `tools` object inside `buildCanonicalTools` alongside dispatch tools:
 
 ```typescript
 import {
@@ -71,7 +73,7 @@ import {
   createSessionLinkTool,
 } from "./session/tools.ts";
 
-// Inside createPluginHooks:
+// 说明：下列代码为示意。实际注册位于 buildCanonicalTools（src/platform/tool-assembly.ts），且仅注册已实现的 6 个会话工具。
 return {
   tool: {
     // ... existing dispatch tools ...
@@ -115,7 +117,7 @@ export function createMyTool(client: PluginInput["client"]) {
 }
 ```
 
-### 1.4 Critical: SDK v2 API Call Pattern
+### 1.4 Critical: SDK v2 API（应用程序接口，Application Programming Interface）Call Pattern
 
 The opencode v2 SDK uses **flat parameter objects** and returns a `RequestResult` envelope. **Every client call must follow this pattern:**
 
@@ -345,14 +347,14 @@ await client.session.update({
 });
 ```
 
-### 4.2 Session-Task Link Persistence (`src/session/linking.ts`)
+### 4.2 Session-Task Link Persistence（规划文件 `src/session/linking.ts` — 未实现）
 
 ```typescript
 // State file: .rolebox/state/session-links.json
 // Format: SessionLinkRecord[]
 ```
 
-**Persistence pattern** (same as `src/dispatch/task-store.ts`):
+**Persistence pattern** (same as `src/dispatch/persistence/task-store.ts` — `TaskStateStore`):
 1. Read existing data from file (or start with `[]` if file doesn't exist)
 2. Mutate in-memory
 3. Write atomically: `writeFileSync(tmpPath, json); renameSync(tmpPath, targetPath)`
@@ -365,15 +367,15 @@ All other tools (search, analytics, export, timeline) are stateless.
 
 ## 5. Utility Specifications
 
-### 5.1 `src/session/search.ts`
+### 5.1 `src/session/search.ts`（规划文件 — 未实现；搜索能力已并入 `session_search` 工具 `src/session/session-browse-tools.ts`）
 
 Searches `SessionMessageUser` (text field) and `SessionMessageAssistant` (content parts with `type: "text"`). Excludes shell output, synthetic, compaction, and agent/model-switched messages.
 
-### 5.2 `src/session/analytics.ts`
+### 5.2 `src/session/analytics.ts`（规划文件 — 未实现；部分数据经 `session_info`/`session_inspect` 提供）
 
 Pure synchronous function — no I/O. Computes: token totals, cost aggregation, tool call frequency, model usage breakdown, duration stats. Handles empty input gracefully (returns zeroes).
 
-### 5.3 `src/session/export.ts`
+### 5.3 `src/session/export.ts`（规划文件 — 未实现）
 
 Markdown format: `# {title}` header, metadata block, `## Messages` section with timestamped entries, tool calls in fenced code blocks. JSON: standard `JSON.stringify`.
 
@@ -385,6 +387,8 @@ Markdown format: `# {title}` header, metadata block, `## Messages` section with 
 **Subtask 1** — Create `src/session/` directory, `types.ts`, and barrel `tools.ts`.
 
 ### Phase 2: Utilities
+> **说明：** Subtask 2-5 的 4 个工具模块（linking/search/analytics/export）均未实现（推迟），见「What Changed Since This Strategy」。
+
 **Subtask 2** — `src/session/linking.ts`
 **Subtask 3** — `src/session/search.ts`
 **Subtask 4** — `src/session/analytics.ts`
@@ -394,7 +398,7 @@ Markdown format: `# {title}` header, metadata block, `## Messages` section with 
 **Subtask 6-15** — All 10 tool creation functions (list, read, search, info, analytics, export, tag, resume, timeline, link)
 
 ### Phase 4: Integration
-**Subtask 16** — Wire all tools into `src/plugin-hooks.ts`
+**Subtask 16** — Wire all tools into `src/platform/tool-assembly.ts`
 
 ### Phase 5: Testing
 **Subtask 17-21** — 5 test files (tools, analytics, export, search, linking)
@@ -441,7 +445,7 @@ Markdown format: `# {title}` header, metadata block, `## Messages` section with 
 | 工具创建模式 | `create*Tool(client)` | ✅ 按计划实现 | 使用 `defineTool`（`src/platform/ports/tool-factory.ts`） |
 | SDK API 模式 | 扁平参数 + RequestResult 解包 | ✅ 按计划实现 | SessionClientWrapper 封装 |
 
-> **注意：** 实际工具注册见 `src/platform/tool-assembly.ts:100-109`。推迟的工具未来可能以不同形式实现。
+> **注意：** 实际工具注册见 `src/platform/tool-assembly.ts:107-112`。推迟的工具未来可能以不同形式实现。
 
 ## 8. Test Plan
 
@@ -481,7 +485,7 @@ None required. All configuration is via tool parameters.
 
 ## 11. Acceptance Criteria
 
-1. All 10 tools registered as `plugin.tool` hooks in `src/plugin-hooks.ts`
+1. All 10 tools registered via `buildCanonicalTools` in `src/platform/tool-assembly.ts`（实际注册 6 个会话工具：`src/platform/tool-assembly.ts:107-112`）
 2. `tsc --noEmit` passes with zero errors
 3. `bun test tests/session/` passes all 5 test files (minimum 40+ test cases)
 4. `bun test tests/dispatch/` and `bun test tests/plugin-hooks.test.ts` pass with no regressions

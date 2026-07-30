@@ -56,7 +56,7 @@ description: rolebox 当前版本已知限制 — 角色继承、运行时切换
 | 限制 | 默认值 | 说明 |
 |---|---|---|
 | **存储后端** | bun:sqlite（WAL 模式） | 使用 `bun:sqlite` 作为持久化引擎，启用 WAL 日志模式以提高并发性能。详见 `store.ts:28-29` |
-| **全文检索引擎** | FTS5 | 基于 SQLite FTS5 虚拟表，自动同步 `title`、`content`、`tags` 字段。详见 `schema.ts:29-34` |
+| **全文检索引擎** | FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5） | 基于 SQLite FTS5 虚拟表，自动同步 `title`、`content`、`tags` 字段。详见 `schema.ts:29-34` |
 | **列表默认上限** | 20 条 | `memory_list` 未指定 `limit` 时最多返回 20 条摘要记录。详见 `store.ts:212` |
 | **搜索默认上限** | 10 条 | `memory_recall` 未指定 `limit` 时最多返回 10 条完整记录。详见 `search.ts:42` |
 | **自动注入上限** | 10 条 | 会话启动时自动注入系统提示的记忆摘要最大数量。详见 `types.ts:13` |
@@ -122,7 +122,7 @@ description: rolebox 当前版本已知限制 — 角色继承、运行时切换
 
 ## 外部工具限制
 
-### LSP 服务器
+### LSP 服务器（语言服务器协议，Language Server Protocol）
 
 rolebox 内置的 LSP 服务器注册表（`src/lsp/servers.ts:9-122`）支持以下语言，每个语言对应一个外部服务器二进制文件：
 
@@ -150,7 +150,7 @@ Web 抓取功能依赖可选的浏览器自动化包（`src/web/browser-detect.t
 
 如果两者都未安装，web 抓取回退到静态 HTTP 请求模式，无法渲染 JavaScript 生成的内容。
 
-### TUI (终端 UI)
+### TUI（终端用户界面，Terminal User Interface）
 
 rolebox 的终端 UI 默认支持 macOS 和 Linux 终端（如 iTerm2、Kitty、Terminator）。Windows 终端兼容性取决于使用的终端模拟器 —— PowerShell 和 Windows Terminal 的基本功能可用，但某些高级渲染特性（如 ANSI 转义序列）可能受限。
 

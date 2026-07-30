@@ -36,29 +36,29 @@ rolebox 通过 `@opencode-ai/plugin` SDK 与 opencode 通信，插件接口的�
 |---------|---------|-------------|---------|
 | 角色 YAML 系统 | v0.1.0 | ≥1.0.0 | — |
 | Functions 函数系统 (plan/execute) | v0.2.0 | ≥1.0.0 | — |
-| CLI 工具链 (init/sync/search/list/update/registry) | v0.4.0 | ≥1.0.0 | — |
+| CLI（命令行界面，Command-Line Interface）工具链 (init/sync/search/list/update/registry) | v0.4.0 | ≥1.0.0 | — |
 | 子代理系统 (dispatch/output/cancel) | v0.5.1 | ≥1.0.0 | — |
 | References 与 Collaboration Graph | v0.6.0 | ≥1.0.0 | — |
 | Dispatch 调度引擎 (事件驱动、并发隔离、持久化) | v0.10.0 | ≥1.0.0 | — |
 | Monitor 监控面板 | v0.11.0 | ≥1.0.0 | — |
 | Loop 循环迭代系统 | v0.14.0 | ≥1.0.0 | — |
-| LSP 语言服务器集成 (30+ 工具) | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
+| LSP（语言服务器协议，Language Server Protocol）语言服务器集成 (30+ 工具) | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
 | 会话管理 (session_list/read/search/info/diff/fork) | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
 | Hashline 内容哈希编辑 | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
 | 模型重复预防 | v0.18.0 | ≥1.3.0 | — |
 | 扩展系统与自定义 Hook | v0.19.0 | ≥1.3.0 | — |
 | 错误恢复框架 (7+ 策略) | v0.19.0 | ≥1.3.0 | — |
 | 通知管理器 (多通道、静默时段) | v0.19.0 | ≥1.3.0 | — |
-| 持久记忆系统 (SQLite + FTS5) | v0.20.0 | ≥1.3.0 | **Bun** (bun:sqlite) |
+| 持久记忆系统 (SQLite + FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5）) | v0.20.0 | ≥1.3.0 | **Bun** (bun:sqlite) |
 | 微内核架构与热重载 | v0.20.0 | ≥1.3.0 | — |
 | Token/成本预算管理 | v0.20.0 | ≥1.3.0 | — |
-| TUI 仪表板 (rolebox monitor) | v0.20.0 | ≥1.3.0 | Solid.js + OpenTU |
+| TUI（终端用户界面，Terminal User Interface）仪表板 (rolebox monitor) | v0.20.0 | ≥1.3.0 | Solid.js + OpenTU |
 | 崩溃恢复 (降级启动) | v0.21.0 | ≥1.3.0 | — |
 | Asset 工具套件 (search/inspect/validate) | v0.21.0 | ≥1.3.0 | — |
 | Context Assembly 跨域搜索 | v0.21.0 | ≥1.3.0 | — |
 | web_fetch / web_read (多后端渲染) | v0.22.0 | ≥1.3.0 | Playwright / Crawlee (可选) |
-| Signal 带外控制信号 | v0.22.0 | ≥1.3.0 | — |
-| Dispatch 检查点与进度报告 | v0.23.0 | ≥1.3.0 | — |
+| Signal 带外控制信号（不嵌入文本内容、独立传递的控制信令） | v0.22.0 | ≥1.3.0 | — |
+| Dispatch 检查点（子代理执行期间保存的进度快照）与进度报告 | v0.23.0 | ≥1.3.0 | — |
 | TUI 鼠标交互、指标面板 | v0.23.0 | ≥1.3.0 | Solid.js + OpenTU |
 
 > 来源：`../rolebox/CHANGELOG.md` — 每项功能的引入版本；`../rolebox/package.json:5-7` — `engines.opencode` 声明为 `^1.0.0`；`../rolebox/package.json:77` — `peerDependencies['@opencode-ai/plugin']` 声明为 `^1.3.0`。
