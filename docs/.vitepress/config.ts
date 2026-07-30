@@ -94,6 +94,7 @@ export default withMermaid(
                 { text: "会话工具策略", link: "/04-Advanced/design-decisions/session-tools-strategy" },
               ],
             },
+            { text: "图执行引擎", link: "/04-Advanced/graph-engine" },
             { text: "工作流模式", link: "/04-Advanced/workflow-patterns" },
             { text: "终止条件", link: "/04-Advanced/termination-conditions" },
             { text: "运行时行为", link: "/04-Advanced/runtime-behavior" },
