@@ -5,9 +5,11 @@ description: rolebox 协作图 5 种终止条件类型详解，any_of/all_of 组
 
 # 终止条件
 
-> **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 图状态管理与 FSM 生命周期 | [信号系统](/04-Advanced/signal-system) — 带外控制信令机制 | [工作流模式](/04-Advanced/workflow-patterns) — 协作图拓扑与边配置
+> **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 图状态管理与 FSM（有限状态机，Finite State Machine）生命周期 | [信号系统](/04-Advanced/signal-system) — 带外控制信令机制 | [工作流模式](/04-Advanced/workflow-patterns) — 协作图拓扑与边配置
 
-协作图的终止条件（termination conditions）决定多代理工作流**何时停止执行**。rolebox 提供 5 种条件类型，支持 `any_of`（任一满足即止）和 `all_of`（全部满足才止）两种组合语义，以及条件间的优先级排序。
+协作图跑起来之后，总得有个时候停下来。终止条件（termination conditions）就是回答『何时停止』的那组规则：正常完成、达到上限、或者出问题，都由它来判定。
+
+协作图提供了 5 种条件类型，支持 `any_of`（任一满足即止）和 `all_of`（全部满足才止）两种组合语义，以及条件间的优先级排序。
 
 所有终止相关逻辑集中在 `src/graph/termination.ts`（同步评估）、`src/graph/termination-async.ts`（异步评估）和 `src/graph/termination-parser.ts`（配置解析）三个文件中。
 
@@ -37,7 +39,7 @@ export type LoopCondition =
 
 ### 1. max_iterations — 最大迭代次数
 
-当协作循环的迭代计数器达到指定值时触发。迭代计数器在每次退边（back-edge）被遍历时递增（`src/graph/state.ts:119-122`）。
+当协作循环的迭代计数器达到指定值时触发（`max_iterations` 即循环最大轮数上限，用于防止死循环）。迭代计数器在每次退边（back-edge）被遍历时递增（`src/graph/collaboration-state.ts:119-122`）。
 
 ```yaml
 # role.yaml
@@ -88,7 +90,7 @@ collaboration:
       - timeout_ms: 120000
 ```
 
-**内部机制：** `src/graph/termination.ts:56-59` 检查 `now - state.loopStartTimeMs >= cond.timeout_ms`。`loopStartTimeMs` 由 `advanceStep` 在首次遇到退边时设置（`src/graph/state.ts:112`）。
+**内部机制：** `src/graph/termination.ts:56-59` 检查 `now - state.loopStartTimeMs >= cond.timeout_ms`。`loopStartTimeMs` 由 `advanceStep` 在首次遇到退边时设置（`src/graph/collaboration-state.ts:112`）。
 
 ```typescript
 // src/graph/termination.ts:56-59
@@ -132,7 +134,7 @@ if ("stuck" in cond) {
 
 ### 4. converged — 收敛
 
-收敛检测通过**异步 judge 函数**（`JudgeFn`）判断结果是否达到质量标准。由 `src/graph/advance.ts` 在幕后启动异步评估。
+收敛检测通过**异步 judge 函数**（`JudgeFn`）判断结果是否达到质量标准。由 `src/graph/collaboration-advance.ts` 在幕后启动异步评估。
 
 ```yaml
 # role.yaml
@@ -146,7 +148,7 @@ collaboration:
       - converged: validator
 ```
 
-**内部机制：** `src/graph/termination-async.ts:68-103` 调用 `JudgeFn` 检查指定代理的最新结果是否满足收敛条件。该评估有 30 秒超时和最多 2 次重试（`src/graph/advance.ts:161-219`）：
+**内部机制：** `src/graph/termination-async.ts:68-103` 调用 `JudgeFn` 检查指定代理的最新结果是否满足收敛条件。该评估有 30 秒超时和最多 2 次重试（`src/graph/collaboration-advance.ts:165-223`）：
 
 ```typescript
 // src/graph/termination-async.ts:92-99
@@ -303,11 +305,11 @@ if (cfg.all_of?.length) {
 
 ## continue_until 与 exit_conditions 的区别
 
-协作图中有两个相关的终止概念，容易混淆：
+协作图中有两个相关的终止概念，容易混淆：**continue_until**（一个终止/继续条件：持续执行直到某条件满足）与 `exit_conditions`。
 
 ### exit_conditions（编译时指令）
 
-`exit_conditions` 是 `buildCollaborationBlock`（`src/graph/prompt-builder.ts`）根据拓扑自动生成的 **XML 指令**，注入到大模型系统提示中，指导路由器何时停止派发：
+`exit_conditions` 是 `buildCollaborationBlock`（`src/graph/prompt-builder.ts`）根据拓扑（协作图的预设结构模式：pipeline 串行、review-loop 循环、star 并行）自动生成的 **XML 指令**，注入到大模型系统提示中，指导路由器何时停止派发：
 
 ```xml
 <!-- Pipeline 的 exit_conditions（prompt-builder.ts:155-156） -->
@@ -333,10 +335,10 @@ The graph completes when: an exit-point agent returns their output, OR max 5 ite
 
 ### continue_until（运行时条件）
 
-`termination` 配置（`continue_until` 的概念等价）是**运行时引擎**用来主动终止工作流的条件。代码层面通过 `evaluateSync` 函数在每个 `advanceStep` 之后同步检查（`src/graph/state.ts:138-146`）：
+`termination` 配置（`continue_until` 的概念等价）是**运行时引擎**用来主动终止工作流的条件。代码层面通过 `evaluateSync` 函数在每个 `advanceStep` 之后同步检查（`src/graph/collaboration-state.ts:138-146`）：
 
 ```typescript
-// src/graph/state.ts:138-146
+// src/graph/collaboration-state.ts:138-146
 const reason = evaluateSync(state, graph, Date.now());
 if (reason) {
   state.terminationReason = reason;
@@ -354,7 +356,7 @@ if (reason) {
 |------|----------------|------------------------------|
 | 本质 | 大模型提示指令 | 运行时引擎主动检查 |
 | 位置 | prompt-builder.ts 生成 XML | state.ts termination.ts 代码执行 |
-| 触发者 | 路由器（LLM）手动判断 | 引擎自动评估 |
+| 触发者 | 路由器（LLM 大语言模型，Large Language Model）手动判断 | 引擎自动评估 |
 | 精度 | 文本描述，依赖 LLM 理解 | 精确数值/布尔条件 |
 | 典型用途 | Pipeline 末尾结束 | 循环保护、收敛检测、停滞检测 |
 
@@ -368,7 +370,7 @@ if (reason) {
 
 ## 内置条件与信号系统集成
 
-除上述 5 种终止条件外，`signal_observed(type)` 是 FSM 的内建命名条件（`src/function/conditions.ts:57-68`），可在函数的 `gate`、`transitions` 或 `continue_until` 中引用。例如：
+除上述 5 种终止条件外，`signal_observed`（一个条件表达式，用于查询『是否观察到了指定类型的信号』）是 FSM 的内建命名条件（`src/function/conditions.ts:57-68`），可在函数的 `gate`、`transitions` 或 `continue_until` 中引用。例如：
 
 ```yaml
 termination:
@@ -381,7 +383,7 @@ termination:
 
 ## 扩展自定义条件
 
-可以通过 `registerTerminationParser` API 注册自定义终止条件解析器：
+可以通过 `registerTerminationParser` API（应用程序接口，Application Programming Interface）注册自定义终止条件解析器：
 
 ```typescript
 // src/graph/termination-parser.ts:39-49

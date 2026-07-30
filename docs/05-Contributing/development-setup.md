@@ -35,7 +35,7 @@ bun install
 
 | 命令 | 用途 |
 |------|------|
-| `bun run build` | 执行 tsc 编译 + TUI 构建 |
+| `bun run build` | 执行 tsc 编译 + TUI（终端用户界面）构建 |
 | `bun run build:tui` | 仅构建 TUI 子系统 |
 | `bun run typecheck` | 仅类型检查 (`tsc --noEmit`)，不含输出 |
 
@@ -47,7 +47,7 @@ bun install
 
 `bun run build:tui` 由 `scripts/build-tui.ts` 驱动，分三步执行：
 
-1. **Bun 打包**：以 `src/tui/index.tsx` 为入口，使用 `@opentui/solid` 的 Bun 插件转换 JSX，输出 `dist/tui.js`（ESM 格式，目标 `bun`）
+1. **Bun 打包**：以 `src/tui/index.tsx` 为入口，使用 `@opentui/solid` 的 Bun 插件转换 JSX，输出 `dist/tui.js`（ESM 格式，即 ES 模块 / ECMAScript Modules，目标 `bun`）
 2. **类型声明**：通过 `tsconfig.tui.json` 运行 `tsc --declaration --emitDeclarationOnly`，输出到 `dist/tui/` 目录；已知 `tsc` 返回退出码 2 是预期的（Solid 插件的运行时类型不匹配，不影响运行时）
 3. **`d.ts` 重定位**：将 `dist/tui/index.d.ts` 复制为 `dist/tui.d.ts`，匹配 `package.json` 中 `exports["./tui"].types` 的引用路径
 
@@ -83,7 +83,7 @@ tests/
 │   └── ...
 ├── graph/                 # 协作图子系统（推进、解析、终止、存储）
 │   ├── advance.test.ts    # 图推进逻辑
-│   ├── parser.test.ts     # 边/流解析
+│   ├── graph-v2.test.ts   # 边/流解析（parser-v2 的 parseGraph）
 │   ├── state.test.ts      # 执行状态管理
 │   ├── termination*.ts    # 终止条件评估
 │   └── ...
@@ -108,6 +108,7 @@ tests/
 ├── lsp/                   # LSP 客户端管理
 ├── utils/                 # 工具函数（路径、超时、显示）
 └── integration/           # 跨模块集成测试
+```
 
 ### 测试约定
 
@@ -117,8 +118,8 @@ tests/
 
 | 源码路径 | 测试文件 |
 |----------|----------|
-| `src/dispatch/manager.ts` | `tests/dispatch/manager.test.ts` |
-| `src/graph/state.ts` | `tests/graph/state.test.ts` |
+| `src/dispatch/core/manager.ts` | `tests/dispatch/manager.test.ts` |
+| `src/graph/collaboration-state.ts` | `tests/graph/state.test.ts` |
 | `src/memory/store.ts` | `tests/memory/store.test.ts` |
 | `src/cli/commands/list.ts` | `tests/cli/commands/list.test.ts` |
 
@@ -149,8 +150,8 @@ describe("dispatch manager", () => {
 
 rolebox 采用模块级测试覆盖策略。当前 `tests/` 目录下覆盖 25+ 子目录，共 200+ 测试文件。新功能应添加对应的单元测试文件，集成测试统一放在 `tests/integration/` 目录下。运行 `bun test --coverage` 可查看覆盖率报告，重点关注：
 
-- **dispatch/**（34 个测试文件）— 核心调度逻辑，需覆盖正常路径和错误路径（超时、并发限制、检查点恢复）
-- **graph/**（19 个测试文件）— 协作图推进和终止条件，需覆盖多种拓扑模板
+- **dispatch/**（34 个测试文件）— 核心调度逻辑，需覆盖正常路径和错误路径（超时、并发限制、检查点（进度快照）恢复）
+- **graph/**（19 个测试文件）— 协作图推进和终止条件，需覆盖多种拓扑模板（协作图预设结构模式：pipeline / review-loop / star）
 - **hooks/**（10 个测试文件）— 生命周期 Hook，需覆盖消息拦截和工具调用前后处理
 - **core/**（9 个测试文件）— 服务生命周期和降级机制
 - **integration/**（8 个测试文件）— 跨模块端到端场景，验证调度 → 循环 → 恢复全链路

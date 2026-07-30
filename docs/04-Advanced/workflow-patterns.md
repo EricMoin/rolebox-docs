@@ -5,11 +5,20 @@ description: rolebox 协作图内建拓扑结构与自定义工作流模式详�
 
 # 工作流模式
 
-> **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 图状态管理与 FSM 生命周期 | [终止条件](/04-Advanced/termination-conditions) — continue_until 条件与收敛检测 | [协作图](/02-Guide/collaboration-graph) — 内置拓扑与自定义流配置
+> **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 图状态管理与 FSM（有限状态机，Finite State Machine）生命周期 | [终止条件](/04-Advanced/termination-conditions) — continue_until 条件与收敛检测 | [协作图](/02-Guide/collaboration-graph) — 内置拓扑与自定义流配置
 
-协作图（collaboration graph）定义了子代理之间的工作流转路径。rolebox 提供三种内建拓扑（template）——**Pipeline**、**Review-Loop**、**Star**——同时支持通过显式 `flow` 边定义**自定义拓扑**，以及通过 `flow` 覆盖实现**混合模式**。
+多个子代理协作时，工作该按什么顺序、什么结构流转？这就是**工作流模式**要回答的问题——它让你用最少的配置表达『谁先做、谁后做、谁可以并行、谁能把结果打回重做』。
 
-所有内建拓扑的扩展逻辑由 `src/graph/templates.ts` 实现，经过 `src/graph/parser.ts` 解析和 `src/graph/validator.ts` 校验后，最终由 `src/graph/prompt-builder.ts` 生成 `<collaboration_graph>` 指令注入到大模型系统提示中。
+协作图（collaboration graph）定义了子代理之间的工作流转路径。rolebox 提供三种内建**拓扑**（topology，协作图的预设结构模式：pipeline 串行、review-loop 循环、star 并行）——**Pipeline**、**Review-Loop**、**Star**——同时支持通过显式 `flow` 边定义**自定义拓扑**，以及通过 `flow` 覆盖实现**混合模式**。
+
+所有内建拓扑都走同一套流水线：先由模板展开，再解析校验，最后生成 `<collaboration_graph>` 指令注入到大模型系统提示中（源码定位见下方）。
+
+::: tip 源码定位
+- 拓扑扩展逻辑：`src/graph/templates.ts`
+- 配置解析：`src/graph/parser-v2.ts`
+- 拓扑校验：`src/graph/collaboration-validator.ts`
+- 提示块生成：`src/graph/prompt-builder.ts`
+:::
 
 ---
 
@@ -41,7 +50,7 @@ flowchart LR
 
 ### 边展开逻辑
 
-每个 pipeline 在代码层面展开为 `(n+1)` 条边：`parent → agents[0]`，`agents[i] → agents[i+1]`（共 n-1 条），以及 `agents[last] → parent`（标记为 exit）：
+每个 pipeline 在代码层面展开为 `(n+1)` 条边：`parent → agents[0]`，`agents[i] → agents[i+1]`（共 n-1 条），以及 `agents[last] → parent`（标记为 exit；`parent` 为协作图保留名，指编排器/父角色的固定节点）：
 
 ```typescript
 // src/graph/templates.ts:51-59
@@ -135,14 +144,14 @@ collaboration:
           repeats: 3
 ```
 
-路由器在每次 `critic` 完成时判断输出质量：若质量达标则选择 exit 边结束流程；若需修订则选择 loop 边重新派发给 `writer`。迭代次数受 `max_iterations` 保护（`src/graph/state.ts:127`）。
+路由器在每次 `critic` 完成时判断输出质量：若质量达标则选择 exit 边结束流程；若需修订则选择 loop 边重新派发给 `writer`。迭代次数受 `max_iterations`（循环最大轮数上限，防止死循环）保护（`src/graph/collaboration-state.ts:127`）。
 
 ### 循环检测
 
-Review-Loop 中的循环由 `src/graph/loop-detector.ts` 通过 Tarjan 强连通分量算法自动检测（`loop-detector.ts:13-75`）。一旦检测到循环而未设置 `max_iterations`，验证器会给出警告并默认设为 3（`src/graph/validator.ts:167-179`）：
+Review-Loop 中的循环由 `src/graph/loop-detector.ts` 通过 Tarjan 强连通分量算法自动检测（`loop-detector.ts:13-75`）。一旦检测到循环而未设置 `max_iterations`，验证器会给出警告并默认设为 3（`src/graph/collaboration-validator.ts:178-190`）：
 
 ```typescript
-// src/graph/validator.ts:172-178
+// src/graph/collaboration-validator.ts:184-189
 if (!graph.maxIterations || graph.maxIterations <= 0) {
   const msg =
     "Cycle detected in graph but maxIterations is not set, defaulting to 3";
@@ -326,17 +335,17 @@ flowchart LR
 
 ## 路由器如何分发
 
-路由器收到协作图后，`src/graph/state.ts` 中的 `GraphSessionState` 管理执行状态（`state.ts:75-172`），包括：
+路由器收到协作图后，`src/graph/collaboration-state.ts` 中的 `GraphSessionState` 管理执行状态（`collaboration-state.ts:75-172`），包括：
 
 - **Frontier**（前沿）：当前可被派发的代理集合
 - **Completed**（已完列表）：已完成的代理列表
 - **Iteration counter**（迭代计数器）：记录循环迭代次数
 
-当路由器 `dispatch` 到某代理后，`advanceGraphForDispatch`（`src/graph/advance.ts:96-151`）推进状态：从 frontier 移除该代理，将后继节点加入 frontier，检查 `exit` 边判断是否终止。
+当路由器 `dispatch` 到某代理后，`advanceGraphForDispatch`（`src/graph/collaboration-advance.ts:97-155`）推进状态：从 frontier 移除该代理，将后继节点加入 frontier，检查 `exit` 边判断是否终止。
 
 ### 自定义拓扑注册
 
-开发者可以通过 `registerTopology` API 注册运行时自定义拓扑（`src/graph/templates.ts:14-22`）：
+开发者可以通过 `registerTopology` API（应用程序接口，Application Programming Interface）注册运行时自定义拓扑（`src/graph/templates.ts:14-22`）：
 
 ```typescript
 // src/graph/templates.ts:14-22
@@ -361,7 +370,7 @@ export function addGraphTemplateValue(name: string): void {
 
 ## 验证规则
 
-`src/graph/validator.ts` 对所有拓扑统一执行 7 项检查（`validator.ts:23-44`）：
+`src/graph/collaboration-validator.ts` 对所有拓扑统一执行 7 项检查（`collaboration-validator.ts:34-55`）：
 
 | # | 检查项 | 说明 |
 |---|--------|------|

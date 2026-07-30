@@ -7,7 +7,7 @@ description: 子代理（Subagent）声明、配置与调度 — 内联声明、
 
 > **相关文档：** [协作图](/02-Guide/collaboration-graph) — 代理间拓扑编排 | [调度配置](/03-Reference/dispatch-config) — 并发与预算控制 | [创建角色](/02-Guide/create-a-role) — 角色创建基础
 
-子代理（Subagent）是父角色通过 `dispatch` 工具委托工作的子级代理。借助子代理，你可以构建能协调多个专业子代理的角色，每个子代理都拥有自己的提示词、技能和配置。
+子代理（Subagent）是父角色委托工作的子级代理。在 rolebox 中，委托通过**图执行引擎（graph engine）**完成——这是 rolebox 统一的多代理编排引擎，它把"谁把工作传给谁"建模成一张有向图来执行：父角色将每次委托建模为一个图节点（`{agent, prompt}` 元组），由引擎负责派发、信号路由与结果回收。`dispatch_*` 工具仍以兼容层形式存在。借助子代理，你可以构建能协调多个专业子代理的角色，每个子代理都拥有自己的提示词、技能和配置。
 
 ## 适用场景
 
@@ -155,9 +155,46 @@ skills:
 dispatch 的开销主要在子代理的**会话初始化**上。对于短任务（如读取文件后立即返回结果），使用同步 dispatch（`run_in_background=false`）更高效。对于长任务（代码生成、批量处理），使用后台 dispatch 可以让父代理同时做其他工作。在一轮会话中复用 `session_id` 继续模式可以避免反复初始化开销。
 :::
 
-## Dispatch 工具
+## 委托：图执行引擎
 
-父代理通过 `dispatch` 工具将工作委派给子代理（实现于 `src/dispatch/tools.ts:13-112`）：
+rolebox `1.0.0` 将多代理协作统一到**图执行引擎**（`src/graph/engine/`）上（CHANGELOG.md:12 引入）。父角色通过命令式 `graph_*` 工具将每次委托建模为一个图节点：
+
+```
+graph_create(name="<任务名>")
+graph_add_node(graph_id, id="review", agent="team-lead--implementer", prompt="实现认证模块")
+graph_run(graph_id, node_id="review")
+```
+
+节点是角色无关的 `{agent, prompt}` 元组（`src/types.graph-v2.ts:65-83`）。`graph_run` 是**非阻塞**的——它派发就绪节点后立即返回，当所有节点完成时引擎向父会话注入 `[GRAPH COMPLETE]` 系统提醒；父代理在下一轮通过 `graph_status(graph_id, include_output=true)` 读取结果一次。这是"派发-唤醒"（yield-and-wake）模型，取代了旧的阻塞等待。
+
+核心 `graph_*` 工具（参数 schema 见 `src/graph/tools/index.ts`）：
+
+| 工具 | 作用 |
+|------|------|
+| `graph_create` | 创建一个图/编排上下文，返回 `graph_id` |
+| `graph_add_node` | 注册一个 `{id, agent, prompt}` 节点（可含 `needs_approval`（需要人工批准）、`join`、`budget`、`completion_condition`） |
+| `graph_add_edge` | 在两个节点间添加有向边（`type`：`always` / `on_signal`（收到指定信号时激活）/ `on_condition`（指定条件为真时激活）） |
+| `graph_add_loop` | 声明一个有界循环组（loop group，可重复执行的一组节点，带最大轮数上限；`max_traversals` 为硬上限） |
+| `graph_run` | 非阻塞派发就绪节点并返回 |
+| `graph_status` | 查询节点/循环/图的运行状态 |
+| `graph_cancel` | 取消图、节点或循环组 |
+| `graph_approve` | 批准/拒绝一个阻塞的 `needs_approval` 节点（`action: approve\|reject`） |
+
+需要按顺序运行的多步工作，用 `graph_add_edge` 连接节点后整体运行；循环修订用 `graph_add_loop`。完整 API（应用程序接口，Application Programming Interface）与高级模式见[图执行引擎](/04-Advanced/graph-engine)。
+
+::: tip 图工具相关术语
+- **needs_approval**：一种节点标记，表示"需要人工批准"；图引擎会在此暂停等待人类确认。
+- **审批门（HITL，人工在环，Human-in-the-loop）**：图执行到需要人工确认的节点时暂停，等人工批准后再继续。
+- **join 评估**：图引擎判断某节点的所有上游输入是否齐备、从而是否满足执行条件的评估。
+- **on_signal / on_condition**：图边的两种触发方式——分别表示"收到指定信号时激活这条边"和"指定条件为真时激活这条边"。
+- **级联取消（cascade）**：取消一个节点时，连带取消其所有下游依赖节点。
+- **检查点（checkpoint）**：子代理执行期间保存的进度快照，重试时可注入，避免重复已完成的工作。
+- **台账（ledger）**：按会话或函数记录的信号写入记录，用于追踪信号历史。
+:::
+
+## Dispatch 兼容工具
+
+`dispatch_*` 工具作为兼容层保留（`src/dispatch/tools.ts:14-24`），供仍使用命令式调用的调用方使用。它与 `graph_*` 是两个独立命名空间，可共存。父代理通过 `dispatch` 工具将工作委派给子代理（`src/dispatch/tools.ts:26-139`）：
 
 ```
 dispatch(subagent="team-lead--implementer", prompt="实现认证模块", run_in_background=true)
@@ -241,10 +278,9 @@ sequenceDiagram
 | `task_id` | `string` | 是 | dispatch 返回的任务 ID |
 | `max_chars` | `number` | 否 | 内联返回的最大字符数（默认 16000），超出则写入文件 |
 | `offset` | `number` | 否 | 结果文本的起始位置（0 基） |
-| `limit` | `number` | 否 | 从 offset 开始返回的最大字符数 |
 | `tail` | `boolean` | 否 | 返回末尾的 max_chars 字符而非窗口 |
 
-实现于 `src/dispatch/tools.ts:116-260`。
+实现于 `src/dispatch/tools.ts:141-275`。仅在收到任务完成的 `<system-reminder>` **之后**调用——切勿轮询。
 
 #### `dispatch_cancel` — 取消任务
 
@@ -252,24 +288,7 @@ sequenceDiagram
 |------|------|------|------|
 | `task_id` | `string` | 是 | 要取消的任务 ID |
 
-实现于 `src/dispatch/tools.ts:262-278`。
-
-#### `dispatch_approve` — 批准人工审批任务
-
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `task_id` | `string` | 是 | 处于 `awaiting_approval` 状态的任务 ID |
-
-将任务转换为完成状态并通知父会话。仅 `awaiting_approval` 状态的任务可被批准。实现于 `src/dispatch/tools.ts:280-309`。
-
-#### `dispatch_reject` — 拒绝人工审批任务
-
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `task_id` | `string` | 是 | 处于 `awaiting_approval` 状态的任务 ID |
-| `reason` | `string` | 否 | 拒绝原因 |
-
-将任务转换为错误状态。实现于 `src/dispatch/tools.ts:311-345`。
+实现于 `src/dispatch/tools.ts:277-293`。
 
 #### `dispatch_metrics` — 运行时指标
 
@@ -278,15 +297,7 @@ sequenceDiagram
 | `format` | `"summary"` \| `"json"` | 否 | 输出格式，默认为 `"summary"` |
 | `export_path` | `string` | 否 | 将 JSON 快照写入文件的路径 |
 
-提供 dispatch 子系统的计数器（如 `dispatch_cancelled_total`）、仪表和直方图。需要设置 `ROLEBOX_METRICS` 环境变量。实现于 `src/dispatch/tools.ts:347-427`。
-
-#### `dispatch_budget` — 预算查询
-
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `parent_session_id` | `string` | 否 | 要查询的会话 ID（默认当前会话） |
-
-显示配置限额、当前使用量、剩余预算和使用百分比。实现于 `src/dispatch/tools.ts:429-446`。
+提供 dispatch 子系统的计数器、仪表和直方图。需要设置 `ROLEBOX_METRICS` 环境变量。实现于 `src/dispatch/tools.ts:295-375`。
 
 #### `dispatch_status` — 任务存活检查
 
@@ -296,28 +307,12 @@ sequenceDiagram
 
 检查任务存活状态，不抛出错误。与 `dispatch_output` 不同，即使任务仍在运行也不会报错。实现于 `src/dispatch/query/task-status.ts`。
 
-#### `dispatch_progress` — 进度报告
-
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `task_id` | `string` | 是 | 要报告进度的任务 ID |
-| `stage` | `string` | 是 | 当前阶段标签（如 `researching`、`implementing`） |
-| `message` | `string` | 是 | 人类可读的进度描述 |
-| `percentage` | `number` | 否 | 完成百分比（0-100） |
-
-子代理调用此工具向父代理报告增量进度。百分比跨越 25/50/75/100% 阈值时会触发里程碑通知。实现于 `src/dispatch/progress/progress-tools.ts:85-133`。
-
-#### `dispatch_checkpoint` — 检查点保存
-
-| 参数 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `task_id` | `string` | 是 | 检查点所属的任务 ID |
-| `phase` | `string` | 是 | 当前阶段标签 |
-| `completed_items` | `string[]` | 是 | 已完成的项 |
-| `remaining_items` | `string[]` | 是 | 待处理的项 |
-| `metadata` | `object` | 否 | 扩展元数据 |
-
-保存中间执行检查点。当任务重试时，检查点上下文自动注入到提示中，避免重复工作。实现于 `src/dispatch/query/checkpoint-tools.ts`。
+::: warning v1.0.0 移除的工具
+`dispatch_approve`、`dispatch_reject`、`dispatch_budget`、`dispatch_progress`、`dispatch_checkpoint` 已在 `1.0.0` 随多代理工作向图引擎整合时移除（`src/dispatch/tools.ts:16-20`；见 `CHANGELOG.md:8`）。它们的功能由 `graph_*` 工具取代：
+- **人工审批** → `graph_approve(graph_id, node_id, action="approve"\|"reject", reason?)`（`src/graph/tools/approve-tools.ts:42-87`）
+- **预算查询** → `graph_status(..., include_budget=true)` 或 `graph_create(..., budget={...})`
+- **进度报告 / 检查点** → 由引擎信号账本（`signalLedger`）与节点制品/证据记录承担
+:::
 
 ### 后台 vs 同步选择指南
 
@@ -464,7 +459,7 @@ rolebox info team-lead
 
 ```bash
 # 查看子代理的完整配置
-rolebox info team-lead --verbose
+rolebox info team-lead
 
 # 审查运行时状态文件
 cat .rolebox/state/dispatch-task-*.json | grep -E "(status|result)"
@@ -474,24 +469,36 @@ cat .rolebox/state/dispatch-task-*.json | grep -E "(status|result)"
 
 **问题陈述：** 你的父角色使用 `gpt-4`，但子代理实际运行在默认模型上（如 `claude-3-haiku`），导致输出质量不如预期。
 
-**原因分析**（来源：`create-a-role.md:227-235`，子代理字段继承规则）：
+**原因分析**（来源：`src/loader/role-loader.ts:95-159`，`applyInheritance`）：子代理的 `model` 遵循继承规则——若父角色设置了 `model` 且子代理未显式覆盖，子代理会继承父角色的 `model`（`INHERITABLE_FIELDS`，`src/constants.ts:123-131`）。如果子代理运行在默认模型上，说明：
 
-子代理**不会自动继承**父角色的 `model` 字段。这是一个常见误区——在父角色中设置 `model: gpt-4` 不会传播给子代理。除非子代理显式声明 `model`，否则使用平台默认模型。
+- 父角色**没有**声明 `model`，且子代理也未声明 → 使用平台默认模型
+- 子代理显式声明了 `model` → 使用子代理自己的声明（覆盖继承值）
 
-**修正前（子代理使用默认模型）：**
+**修正前（父角色未声明 model，子代理使用默认模型）：**
 
 ```yaml
 name: Team Lead
-model: gpt-4
 prompt: You are a team lead.
 subagents:
   - name: Researcher
     description: Researches topics
     prompt: Research the relevant code...
-    # ❌ model 缺失 — 使用默认模型
+    # 父角色与子代理均未声明 model → 使用默认模型
 ```
 
-**修正后（子代理显式声明 model）：**
+**修正方式一（在父角色声明 model，子代理继承）：**
+
+```yaml
+name: Team Lead
+model: gpt-4                 # ✅ 父角色声明 → 子代理未覆盖时继承
+prompt: You are a team lead.
+subagents:
+  - name: Researcher
+    description: Researches topics
+    prompt: Research the relevant code...
+```
+
+**修正方式二（子代理显式声明，覆盖父角色）：**
 
 ```yaml
 name: Team Lead
@@ -500,27 +507,25 @@ prompt: You are a team lead.
 subagents:
   - name: Researcher
     description: Researches topics
-    model: gpt-4                 # ✅ 显式声明 — 不会继承父角色的 model
+    model: claude-3-haiku     # ✅ 显式覆盖父角色的 model
     prompt: Research the relevant code...
 ```
 
 **排查步骤：**
 
-1. **检查子代理的 `model` 字段**：每个需要特定模型的子代理都必须显式声明
-2. **使用 `rolebox info` 查看解析结果**：
+1. **用 `rolebox info` 查看解析结果**：
    ```bash
-   rolebox info team-lead --verbose
+   rolebox info team-lead
    ```
-   输出中每个子代理的 `model` 字段会显示实际使用的模型
-3. **不要在父角色中为子代理指定模型**：父角色中的 `model` 是父角色的模型，子代理需要自己的 `model` 声明（来源：`create-a-role.md:232-233`）
+   （`--json` 可输出机器可读字段；`info` 命令没有 `--verbose` 标志，参数见 `src/cli/commands/info.ts:265-279`）
+2. **确认父角色与子代理的 `model` 声明**：子代理未声明 `model` 时继承父角色；父角色也未声明则使用平台默认模型
 
-**继承速查表：**
+**继承速查表（`applyInheritance`，`src/loader/role-loader.ts:139-149`）：**
 
 | 是否从父角色继承 | 字段 |
 |---|---|
-| ❌ 不会自动继承 | `model`、`temperature`、`top_p`、`skills`、`permission`、`functions` |
-| ✅ 需要显式声明 | `name`、`prompt` |
-| ✅ 可选声明 | `description`、`color`、`tools` |
+| ✅ 自动继承（未显式声明时） | `model`、`color`、`variant`、`temperature`、`top_p`、`permission`、`tools` |
+| ❌ 不继承 | `name`、`description`、`prompt` / `prompt_file`、`skills`、`opencode_skills`、`functions`、`disable_functions`、`subagents`、`auto_activate`、`locked` |
 
 ## 下一步
 
