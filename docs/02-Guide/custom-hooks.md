@@ -7,7 +7,7 @@ description: 开发自定义 Hook 模块和扩展 — 模块契约、handler 方
 
 > **相关文档：** [Hook 参考](/03-Reference/hooks) — 内置 Hook 类型与配置 | [扩展机制](/03-Reference/extensions) — 扩展点注册与自定义模块 | [创建角色](/02-Guide/create-a-role) — 完整的角色创建指南
 
-自定义 Hook 允许你在 rolebox 的生命周期中注入自己的逻辑。通过 `role.yaml` 的 `hooks.custom` 字段声明。
+自定义 Hook（钩子）允许你在 rolebox 的生命周期中注入自己的逻辑——例如在每次文件编辑后自动检查代码质量。你通过 `role.yaml` 的 `hooks.custom` 字段声明它们；每个 Hook 暴露一组可选的 Handler 方法，这组方法就是 Hook 对外的 API（应用程序接口，Application Programming Interface）。
 
 ## Hook 声明
 
@@ -437,8 +437,8 @@ CustomHookRegistry
 
 | 扩展作用域 | 用途 | Module 契约 |
 |-----------|------|-------------|
-| `conditions` | 自定义 gate/transition/continue_until 条件 | `{ handler: (arg, env) => boolean }` |
-| `graph_topologies` | 自定义协作图拓扑 | `{ expand: (agents) => FlowEdge[] }` |
+| `conditions` | 自定义 gate（门控）/transition（转换）/continue_until（自动延续条件）条件 | `{ handler: (arg, env) => boolean }` |
+| `graph_topologies` | 自定义协作图拓扑（协作图的预设结构模式，如 pipeline/review-loop/star） | `{ expand: (agents) => FlowEdge[] }` |
 | `termination_conditions` | 自定义循环终止条件 | `{ parse: (value, agents) => LoopCondition \| null }` |
 | `recovery_strategies` | 自定义错误恢复策略 | `{ name, execute }` |
 | `recovery_patterns` | 自定义错误检测模式 | `{ name, category, match }` |

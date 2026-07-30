@@ -44,9 +44,11 @@ features:
     details: 编辑 role.yaml 或技能文件后即时生效，无需重启 — 开发与调试零等待
 ---
 
+rolebox 让一个普通的 AI 编程助手变成一支记忆永不丢失的工程团队：角色、技能与协作关系全用 YAML 定义，秒级部署，无需编写代码。先按下面三步搭起你的第一个多代理团队。
+
 ## 🚀 5 分钟构建第一个多代理团队
 
-从零到拥有一个带 Emperor 编排器的多代理团队，只需三步：
+从零到拥有一个带 Emperor 编排器（顶层 AI 编排角色：把任务拆成计划、分派给专业子代理、再验证结果，自己不写代码）的多代理团队，只需三步：
 
 ::: tip 📦 步骤一：安装 rolebox
 ```bash
@@ -84,11 +86,11 @@ rolebox install emperor
 
 ### 🧠 持久记忆系统
 
-- **SQLite + FTS5** — 对每一条存储的决策、规范和教训执行全文搜索
+- **SQLite + FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5）** — 对每一条存储的决策、规范和教训执行全文搜索
 - **Workspace vs Role 隔离** — 项目知识全局共享，角色笔记私有保留
 - **`|memory|` 模式** — 回顾过往会话，提取持久知识，去重，持久化
 - **自动注入** — 会话启动时相关记忆自动浮现为 `<available_memory>`
-- **CLI** — `rolebox memory list`、`search`、`export`、`stats`
+- **CLI（命令行界面，Command-Line Interface）** — `rolebox memory list`、`search`、`export`、`stats`
 
 ### ✂️ Hashline 编辑 — 永不漂移的编辑
 
@@ -99,7 +101,7 @@ rolebox install emperor
 - **多编辑批处理**支持快照语义 — 所有编辑引用文件原始状态，自底向上应用，行号始终正确
 - **SHA-256 版本追踪** — 在写入前检测外部修改
 
-### 🔬 LSP 集成（30+ 工具）
+### 🔬 LSP（语言服务器协议，Language Server Protocol）集成（30+ 工具）
 
 你的 IDE 拥有的每个语言服务器工具，现在你的 AI 助手也能用。导航（go-to-definition、find-references）、诊断、代码操作、补全、格式化、悬停信息、符号搜索、调用层次结构 — 一个系统对接所有 LSP 服务器，自动检测。
 
@@ -160,7 +162,7 @@ rolebox 社区提供了丰富的预制角色，即装即用：
 | **software-architect** | 系统设计与架构评审 — ADR、C4 模型、权衡分析 | `rolebox install software-architect` |
 | **react-frontend** | React/Next.js 前端开发 — 组件设计、状态管理 | `rolebox install react-frontend` |
 | **ai-designer** | AI 应用设计 — 人性化 UX、交互建模、设计系统 | `rolebox install ai-designer` |
-| **tauri** | 桌面应用开发 — Tauri v2 IPC、插件、窗口管理 | `rolebox install tauri` |
+| **tauri** | 桌面应用开发 — Tauri v2 IPC（进程间通信，Inter-Process Communication）、插件、窗口管理 | `rolebox install tauri` |
 | **dart-flutter** | 跨平台 Flutter 开发 — 完整 Gate 审查流水线 | `rolebox install dart-flutter` |
 
 安装任意角色后重启 opencode 即可使用。浏览完整角色列表 → [oh-my-role 注册表](https://github.com/EricMoin/oh-my-role)

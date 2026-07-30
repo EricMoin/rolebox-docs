@@ -1,13 +1,22 @@
 ---
 title: 扩展机制
-description: 扩展（Extension）系统 — 8 种扩展作用域（条件/拓扑/终止条件/恢复策略/通知通道等）、模块合约与安全机制
+description: 扩展（Extension）系统 — 9 种扩展作用域（条件/拓扑/终止条件/恢复策略/恢复模式/通知通道/通知事件/观察事件/并发策略）、模块合约与安全机制
 ---
 
 # 扩展机制
 
 > **相关文档：** [Hook 机制](/03-Reference/hooks) — 自定义 Hook 系统 | [role.yaml 参考](/03-Reference/role-yaml) — extensions 配置字段 | [错误处理](/03-Reference/error-handling) — 恢复系统集成
 
-扩展机制允许你注册自定义模块，以开放 rolebox 的封闭词汇表 —— 添加自定义条件、图拓扑、终止条件、恢复策略、通知通道和观察事件。无需修改源代码。
+扩展机制允许你注册自定义模块，以开放 rolebox 的封闭词汇表 —— 添加自定义条件、图拓扑、终止条件、恢复策略、恢复模式、通知通道、通知事件、观察事件和并发策略。无需修改源代码（上述术语的含义见下方「术语速览」）。
+
+::: tip 术语速览
+- **扩展点（extension point）** — rolebox 预留给自定义模块接入的扩展位置；本页的 9 种扩展作用域就是 9 类扩展点。
+- **图拓扑 / 拓扑（topology）** — 协作图的预设结构模式：pipeline（串行）、review-loop（循环）、star（并行）。
+- **终止条件（termination）** — 决定协作图循环何时停止执行的条件。
+- **协作图（collaboration）** — 描述多个代理"谁把工作传给谁"的有向图。
+- **continue_until** — 一个终止/继续条件：让执行持续进行，直到某个条件满足才停下。
+- **Hook（挂钩）** — 在特定生命周期事件触发时注入自定义逻辑的机制，详见 [Hook 机制](./hooks)。
+:::
 
 在 `role.yaml` 中声明 `extensions:` 块：
 
@@ -33,7 +42,7 @@ extensions:
 
 ## 支持的作用域
 
-共 8 种扩展作用域，每种对应一个封闭词汇表：
+共 9 种扩展作用域，每种对应一个封闭词汇表：
 
 | 作用域 | 开放内容 | 模块合约 |
 |---|---|---|
@@ -83,6 +92,16 @@ export default {
 };
 ```
 
+### Notification Events（通知事件）
+
+通知事件是**开放字符串**，无需模块合约。在 `extensions.notification_events` 中声明的每个条目仅登记一个事件类型名称（`src/extensions/points/notification-events.ts:7-15`），`module` 字段不被该扩展点加载：
+
+```yaml
+extensions:
+  notification_events:
+    - name: custom_event_occurred
+```
+
 ### Recovery Strategies（恢复策略）
 
 策略模块导出 `name` 和 `execute` 方法。`execute` 接收上下文对象并返回执行结果（合约定义见 `src/extensions/types.ts:85-90`）：
@@ -102,6 +121,23 @@ export default {
 ::: tip 恢复策略注册
 自定义恢复策略除了实现模块合约外，还需要通过 `RecoveryEngine.registerStrategy()`（`src/recovery/engine.ts:163-166`）注册，并调用 `addKnownStrategy()`（`src/recovery/config.ts:101-103`）登记到已知策略列表，确保 YAML 配置验证通过。详见[错误处理](./error-handling#恢复系统-recovery-system)。
 :::
+
+### Recovery Patterns（恢复模式）
+
+恢复模式模块导出 `name`、`category` 和 `match` 方法。`match` 接收错误对象，命中时返回 `RecoveryError`（或任意非空对象），否则返回 `null`（合约定义见 `src/extensions/types.ts:92-100`）：
+
+```javascript
+// ext/my-pattern.js
+export default {
+  name: "my-pattern",
+  category: "session_error",
+  match: (error) => {
+    return error && error.code === "MY_PATTERN"
+      ? { category: "session_error", message: String(error) }
+      : null;
+  },
+};
+```
 
 ### Termination Conditions（终止条件）
 
@@ -260,7 +296,7 @@ async loadExtensions(config, roleDir): Promise<void> {
 9 个内置扩展点各对应一个作用域（`src/extensions/registry.ts:38-65`），`ExtensionRegistry` 构造时注册：
 
 ::: info 扩展点分类说明
-8 种扩展作用域涵盖了 rolebox 中所有可扩展的封闭词汇表。其中 `recovery_strategies` 和 `recovery_patterns` 共享恢复域，`notification_channels` 和 `notification_events` 共享通知域。选择作用域时，明确你要扩充的是逻辑（条件/策略）、结构（拓扑/模式）还是通道（通知）。
+9 种扩展作用域涵盖了 rolebox 中所有可扩展的封闭词汇表。其中 `recovery_strategies` 和 `recovery_patterns` 共享恢复域，`notification_channels` 和 `notification_events` 共享通知域。选择作用域时，明确你要扩充的是逻辑（条件/策略）、结构（拓扑/模式）还是通道（通知）。
 :::
 
 | 扩展点 | 作用域 | 类名 |

@@ -7,9 +7,11 @@ description: rolebox 的 PluginCore 服务架构——11 个服务、事件总�
 
 > **相关文档：** [架构概览](/01-Overview/architecture-overview) — 模块地图与入口文件总览 | [处理管道](/01-Overview/processing-pipeline) — 请求处理流程与阶段分解 | [插件接口](/03-Reference/plugin-interface) — PluginCore 生命周期与平台适配
 
+rolebox 内部围绕一个核心容器和 11 个服务运转：容器负责把它们装配、初始化并按依赖顺序启动，各服务各自承担调度、循环、恢复、记忆等职责。本文介绍这 11 个服务的职责、它们之间的依赖关系，以及服务初始化失败时的降级处理方式。
+
 ## PluginCore + 11 服务
 
-rolebox 采用微内核架构：`PluginCore` 作为服务容器，管理 11 个服务（PluginService）的完整生命周期。
+rolebox 采用微内核架构：`PluginCore`（插件核心容器对象，负责服务注册、事件总线与工具注册）作为服务容器，管理 11 个服务（PluginService）的完整生命周期。
 
 ```mermaid
 graph TB
@@ -55,7 +57,7 @@ graph TB
 
 ## 服务依赖关系
 
-服务按拓扑排序初始化（`src/core/plugin-core.ts:187-219`），`dependencies` 数组声明依赖：
+服务按**拓扑排序**（按依赖关系排定初始化顺序：先初始化被依赖的服务）初始化（`src/core/plugin-core.ts:187-219`），`dependencies` 数组声明依赖：
 
 ```mermaid
 graph LR
@@ -101,10 +103,12 @@ graph LR
     HS -->|依赖| HMS
 ```
 
-> **行引用**: `src/core/services/hook-service.ts:35-48` — HookService 依赖 6 个下游服务  
-> `src/core/services/loop-service.ts:35-38` — LoopService 依赖 DispatchService  
-> `src/core/services/extension-service.ts:17-19` — ExtensionService 依赖 dispatch + recovery  
-> `src/core/services/tool-service.ts:28-31` — ToolService 依赖 4 个服务
+::: tip 源码定位
+- `src/core/services/hook-service.ts:35-48` — HookService 依赖 6 个下游服务
+- `src/core/services/loop-service.ts:35-38` — LoopService 依赖 DispatchService
+- `src/core/services/extension-service.ts:17-19` — ExtensionService 依赖 dispatch + recovery
+- `src/core/services/tool-service.ts:28-31` — ToolService 依赖 4 个服务
+:::
 
 ## 每个服务的职责与生命周期
 
@@ -130,7 +134,7 @@ interface PluginService {
 | 1 | `hot-reload-service` | ❌ | 无 | 文件监视、增量/全量重加载、变更分类（fast/medium/full） |
 | 2 | `dispatch-service` | ✅ | 无 | `DispatchManager`、子代理谱系、持久化、GC |
 | 3 | `loop-service` | ✅ | dispatch | `LoopCoordinator`、循环状态恢复、回环协调 |
-| 4 | `lsp-service` | ❌ | 无 | LSP 客户端管理器、服务器生命周期、诊断/补全工具 |
+| 4 | `lsp-service` | ❌ | 无 | LSP（语言服务器协议，Language Server Protocol）客户端管理器、服务器生命周期、诊断/补全工具 |
 | 5 | `notification-service` | ❌ | 无 | 多通道通知（邮件/Slack/Webhook）、调度、节流 |
 | 6 | `session-service` | ❌ | 无 | 会话 CRUD、搜索、导出、分析工具 |
 | 7 | `recovery-service` | ✅ | 无 | `RecoveryEngine`、内置 Hook 注册、启动状态检查 |
@@ -155,7 +159,7 @@ Tier 4: health-monitor
 health-monitor → hook → tool → extension → loop → recovery → session → notification → lsp → dispatch → hot-reload
 ```
 
-### 服务降级机制
+### 服务降级机制（降级：服务初始化失败时，仅标记该服务不可用并跳过其依赖者，而不是让整个插件崩溃）
 
 非关键服务（`critical: false`/undefined）的 `init()` 失败会被捕获，服务标记为 `permanently_degraded`，其依赖者被跳过：
 
@@ -175,7 +179,9 @@ try { await svc.init(ctx); } catch (err) {
 }
 ```
 
-> **行引用**: `src/core/plugin-core.ts:79-106` — 服务降级逻辑
+::: tip 源码定位
+- `src/core/plugin-core.ts:79-106` — 服务降级逻辑
+:::
 
 ---
 
@@ -232,7 +238,7 @@ this.unsubs.push(
 
 ---
 
-## 组合根
+## 组合根（composition root，程序启动时把所有依赖组件装配起来的位置）
 
 **`src/core/composition.ts:50-103`** — `createPluginHooks` 是系统的组合根：
 
@@ -281,11 +287,13 @@ sequenceDiagram
     Recovery-->>Dispatch: 恢复结果 (recovered/aborted/exhausted)
 ```
 
-> **行引用**: `src/core/composition.ts:64-75` — 全部 11 个服务注册  
-> `src/core/event-bus.ts:36-46` — 事件发射核心实现  
-> `src/core/services/notification-service.ts:59-96` — 事件总线订阅模式  
-> `src/core/plugin-core.ts:63-107` — 拓扑排序初始化与降级逻辑  
-> `src/core/service.ts:14-31` — PluginService 接口定义
+::: tip 源码定位
+- `src/core/composition.ts:64-75` — 全部 11 个服务注册
+- `src/core/event-bus.ts:36-46` — 事件发射核心实现
+- `src/core/services/notification-service.ts:59-96` — 事件总线订阅模式
+- `src/core/plugin-core.ts:63-107` — 拓扑排序初始化与降级逻辑
+- `src/core/service.ts:14-31` — PluginService 接口定义
+:::
 
 ## 下一步
 

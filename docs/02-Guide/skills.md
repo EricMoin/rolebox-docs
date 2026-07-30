@@ -7,7 +7,7 @@ description: 技能（Skill）系统 — 按需加载的知识模块、解析顺
 
 > **相关文档：** [编写技能](/02-Guide/authoring-skills) — 技能模块开发实战 | [函数系统](/02-Guide/functions) — 技能与函数的对比 | [引用文档](/02-Guide/references) — 引用文档的自动发现机制
 
-技能（Skill）是按需加载的知识模块，代理在需要时通过 `skill` 工具加载。与函数不同（函数一旦激活就持续存在），技能是上下文相关的按需加载。
+技能（Skill）是按需加载的知识模块——这体现了"渐进式披露（progressive disclosure）"：系统提示只列出技能的名称和描述，代理真正需要时才加载完整内容。代理在需要时通过 `skill` 工具加载。与函数不同（函数一旦激活就持续存在），技能是上下文相关的按需加载。
 
 ```markdown
 ---
@@ -55,7 +55,7 @@ function buildCandidates(name, roleDir, globalSkillsDir): Candidate[] {
 
 未找到的技能名会被记录日志并静默跳过（第 109-116 行），不抛出错误。
 
-第二遍（第 84-106 行）并行读取所有匹配的 SKILL.md，从 YAML frontmatter 提取 `description`，并调用 `resolveAllReferences`（`src/resolver/reference-resolver.ts:184-216`）解析技能级的引用文档。
+第二遍（第 84-106 行）并行读取所有匹配的 SKILL.md，从 YAML frontmatter（即 Markdown 文件顶部用 `---` 包裹的元数据块）提取 `description`，并调用 `resolveAllReferences`（`src/resolver/reference-resolver.ts:184-216`）解析技能级的引用文档。
 
 ### 分辨率算法工作流
 

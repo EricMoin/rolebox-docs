@@ -5,7 +5,7 @@ description: 跨会话、跨角色的持久记忆系统 — 即时写入与合�
 
 # 记忆系统
 
-> **v0.20.0 引入** — SQLite 持久化记忆系统，支持 FTS5 全文搜索、双层作用域与自动注入（CHANGELOG.md:140）
+> **v0.20.0 引入** — SQLite 持久化记忆系统，支持 FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5）全文搜索、双层作用域与自动注入（CHANGELOG.md:140）
 
 
 > **相关文档：** [记忆策略（设计决策）](/04-Advanced/design-decisions/memory-strategy) — 存储架构与淘汰策略 | [会话工具](/04-Advanced/session-tools) — 会话搜索与分析 | [CLI 参考](/03-Reference/cli) — `rolebox memory` 子命令
@@ -50,11 +50,12 @@ memory_write(title="Auth 使用 JWT+Refresh Token", content="认证系统选用.
 | 源码文件 | 对应文档章节 | 核心职责 |
 |---------|-------------|---------|
 | `src/memory/store.ts` | [设计决策摘要](#设计决策摘要) / [全文搜索行为详解](#全文搜索行为详解) | MemoryStore 类：SQLite CRUD + FTS5 搜索 + LRU touch |
-| `src/memory/search.ts` | [全文搜索行为详解](#全文搜索行为详解) | FTS5 查询逻辑与 BM25 排序 |
+| `src/memory/search.ts` | [全文搜索行为详解](#全文搜索行为详解) | FTS5 查询逻辑与 BM25 排序（经典全文检索相关性排序算法） |
 | `src/memory/tools.ts` | [工具参考](#工具参考) / [memory_update](#memory-update--部分更新) | 4 个工具创建函数（memory_write/recall/list/update） |
 | `src/memory/schema.ts` | [清理与淘汰机制](#清理与淘汰机制) | SQLite 表结构与 FTS5 索引定义 |
 | `src/memory/types.ts` | [设计决策摘要](#设计决策摘要) | MemoryEntry、MemorySummary、MemoryConfig 等类型 |
-| `src/memory/inject.ts` | [注入机制](#注入机制) | buildMemoryBlock + 系统提示注入逻辑 |
+| `src/hooks/system-transform.ts` | [注入机制](#注入机制) | Memory 注入路径（`system-transform.ts:87-112`）：加载 `MemoryStore` 并把 `<available_memory>` 摘要块写入系统提示 |
+| `src/prompt/builder.ts` | [注入机制](#注入机制) | `buildMemoryBlock` 生成注入摘要块（`builder.ts:145-148`） |
 
 > 实现策略的完整 898 行原文请参阅[记忆系统实现策略文档](/04-Advanced/design-decisions/memory-strategy)。
 
@@ -68,7 +69,7 @@ memory_write(title="Auth 使用 JWT+Refresh Token", content="认证系统选用.
 | 工具可用性 | 内置于所有角色（`memory_write`、`memory_recall`、`memory_list`、`memory_update`） |
 | 注入方式 | 会话开始自动注入 `<available_memory>` 摘要块（仅标题和元数据，不含全文） |
 | 注入配置 | 可在 `role.yaml` 中控制注入开关、数量上限、最低相关性级别 |
-| 容量管理 | 每作用域默认上限 500 条，支持按访问时间 LRU 淘汰 |
+| 容量管理 | 每作用域默认上限 500 条 + LRU 淘汰为**策略层规划，尚未落地**——当前通过 `rolebox memory clean` 手动清理实现 |
 | 合并触发 | 手动 `\|memory\|` 激活，无自动触发 |
 
 ::: tip 记忆系统最佳实践
@@ -177,7 +178,7 @@ memory_update(
 当一条现有记忆需要完善（补充细节）、修正（纠正错误信息）或升级（提高相关性级别）时，优先使用 `memory_update` 而非重新写入。这保持了 ID 不变，使 `<available_memory>` 注入的链接保持有效。
 :::
 
-## CLI 命令
+## CLI（命令行界面，Command-Line Interface）命令
 
 ```bash
 rolebox memory list [--scope workspace|role|both] [--category <cat>] [--limit N]
@@ -334,7 +335,7 @@ memory_write(
 | **写入方式** | 代理在运行时通过 `memory_write` 工具写入 | 开发者手动编写 Markdown |
 | **搜索方式** | FTS5 全文搜索（BM25 排名） | 按文件路径/名称引用 |
 | **注入方式** | 自动注入摘要 `<available_memory>`，按需加载全文 | 按参考声明注入 `<available_references>` |
-| **适用范围** | 动态知识：决策记录、教训、偏好、临时事实 | 静态知识：API 文档、架构规范、团队约定 |
+| **适用范围** | 动态知识：决策记录、教训、偏好、临时事实 | 静态知识：API（应用程序接口，Application Programming Interface）文档、架构规范、团队约定 |
 | **生命周期** | 会话级 → 项目级，可按访问频率淘汰 | 随代码库版本迭代 |
 | **典型用例** | "为什么当时选了方案 A？""这个 bug 以前遇到过吗？" | "这个 API 的签名是什么？""项目的编码规范是什么？" |
 | **内容审查** | 自动写入，可能有噪声 | 人工编写，质量可控 |

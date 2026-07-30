@@ -10,7 +10,7 @@ description: 内容哈希锚定编辑系统 — LINE#HASH 锚点、快照语义�
 > **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 协作图状态机与 dispatch 驱动 | [会话工具](/04-Advanced/session-tools) — 10 工具会话管理套件 | [CLI 参考](/03-Reference/cli) — 命令行工具完整参考
 
 ::: tip Node.js 兼容性
-Hashline 编辑系统所有模块均为纯 TypeScript 实现（文件 I/O + 哈希计算 + 文本处理），不依赖任何 Bun 特有 API（如 `bun:sqlite`）。在 Node.js ≥20.0.0 环境下可直接使用，无需额外依赖。详见[兼容性 → 可用 Node.js 运行的功能](/04-Advanced/compatibility#可用-node-js-运行的功能)。
+Hashline 编辑系统所有模块均为纯 TypeScript 实现（文件 I/O + 哈希计算 + 文本处理），不依赖任何 Bun 特有 API（应用程序接口，Application Programming Interface），如 `bun:sqlite`。在 Node.js ≥20.0.0 环境下可直接使用，无需额外依赖。详见[兼容性 → 可用 Node.js 运行的功能](/04-Advanced/compatibility#可用-node-js-运行的功能)。
 :::
 
 

@@ -7,7 +7,14 @@ description: 使用 role.yaml 声明式定义 AI 代理角色的完整指南
 
 > **相关文档：** [目录结构](/01-Overview/directory-structure) — 角色目录与文件布局 | [role.yaml 参考](/03-Reference/role-yaml) — 完整字段参考 | [子代理](/02-Guide/subagents) — 多代理协作
 
-rolebox 通过 YAML 文件声明式定义 AI 代理角色。每个角色由一个目录和其中的 `role.yaml` 文件表示。
+rolebox 允许你用一份 YAML 文件定义"一个 AI 代理角色"——告诉它是什么、能做什么、以及如何与其它代理协作。每个角色由一个目录和其中的 `role.yaml` 文件表示；你只需编写配置，无需编写代码。
+
+::: tip 先认识几个术语
+- **门控（gate）**：函数满足特定条件后才被激活；未满足前函数保持等待（gated）状态。
+- **拓扑（topology）**：多代理协作图（Collaboration Graph）的预设结构模式——pipeline（串行）、review-loop（循环）、star（并行）。
+- **FSM（有限状态机，Finite State Machine）**：描述函数在 active / gated / complete 等状态间转换的模型。
+- **parent**：协作图中的保留名，指编排器（父角色）这个固定节点，是工作流的起点与终点。
+:::
 
 ## 快速开始
 
@@ -211,52 +218,44 @@ dispatch:
 
 ## 模式选择
 
-角色通过 `mode` 字段控制行为模式：
+角色通过 `mode` 字段控制其在代理列表中的呈现与可委托性（枚举值定义于 `src/constants.ts:3-9`）：
 
 | 模式 | 值 | 行为 |
 |------|-----|------|
-| **auto** | `mode: primary` (默认) | 自动选择模式：单代理使用 simple，多代理使用 appropriate |
-| **plan** | 函数驱动 | 通过 `\|plan\|` 函数激活规划阶段，需要用户审批后进入执行 |
-| **default** | 无特殊模式 | 内置 `plan`、`execute`、`loop` 函数始终可用 |
+| **primary** | `primary`（默认） | 作为主代理出现在代理列表中 |
+| **subagent** | `subagent` | 标记为子代理，不主动作为主代理出现，供父角色委托 |
+| **all** | `all` | 同时以主代理和可委托子代理的身份可用 |
 
-模式的行为差异：
-- **auto** 模式：根据 `subagents` 和 `collaboration` 的存在自动决定
-- **plan** 模式：需要显式使用 `|plan|` 激活规划工作流
-- **default** 模式：函数按需激活，无预设编排
+未声明 `mode` 时默认值为 `primary`。角色通过 `dispatch` / `graph_*` 委托子代理时，子代理的 `mode` 通常为 `subagent` 或在协作图中由 `parent` 关联。
 
 ## 子代理字段继承规则
 
-子代理**不会自动继承**父角色的字段（`src/loader/subagents.ts:91-137`，`buildSubAgentFields`）。每个子代理必须显式声明其配置：
+子代理通过 `applyInheritance`（`src/loader/role-loader.ts:95-159`）从父角色继承一组**可继承字段**。当子代理未显式设置这些字段时，会回退到父角色的值。
 
-### 可显式继承的字段
+### 字段继承行为
 
-| 字段 | 类型 | 继承行为 |
-|------|------|----------|
-| `name` | string | **必需** — 子代理的唯一标识符 |
-| `description` | string | 可选，默认为空字符串 |
-| `prompt` / `prompt_file` | string | **必需** — 二选一提供 |
-| `model` | string | 可选，不继承父角色的 model |
-| `color` | string | 可选，不继承父角色的 color |
-| `temperature` | number | 可选，不继承父角色的 temperature |
-| `top_p` | number | 可选，不继承父角色的 top_p |
-| `permission` | object | 可选，不继承父角色的 permission |
-| `tools` | object | 可选，不继承父角色的 tools |
-| `skills` | string[] | 可选，不继承父角色的 skills |
-| `opencode_skills` | string[] | 可选，不继承父角色的 opencode_skills |
-| `functions` | string[] | 可选，不继承父角色的 functions |
-| `disable_functions` | string[] | 可选，不继承父角色的 disable_functions |
-| `auto_activate` | string[] | 可选，子代理自动激活的函数 |
-| `locked` | boolean | 可选，锁定子代理配置 |
+| 字段 | 继承行为 |
+|------|----------|
+| `model`、`color`、`variant` | **从父角色继承**（未显式声明时） |
+| `temperature`、`top_p` | **从父角色继承**（未显式声明时） |
+| `permission`、`tools` | **从父角色继承**（未显式声明时） |
+| `name`、`description` | **不继承** — 子代理必须提供 |
+| `prompt` / `prompt_file` | **不继承** — 必须显式提供其一 |
+| `skills`、`opencode_skills` | **不继承** — 需显式声明 |
+| `functions`、`disable_functions` | **不继承** — 需显式声明 |
+| `subagents`、`auto_activate`、`locked` | **不继承** — 需显式声明 |
+
+可继承字段列表定义于 `src/constants.ts:123-131`（`INHERITABLE_FIELDS`）；每个子代理的必需字段（`name` + `prompt`/`prompt_file`）由 `resolveSubagentEntry` 校验（`src/loader/subagents.ts:40-88`）。
 
 ### 继承原则
 
-1. **零自动继承**：父角色的 `model`、`temperature`、`skills`、`permission` 等不会传播到子代理
-2. **显式声明**：子代理只需要声明与其父角色不同的字段
-3. **嵌套继承**：内联子代理可以拥有自己的 `subagents`，形成递归嵌套（`src/loader/subagents.ts:162-174`）
-4. **文件式发现**：子代理可以通过 `subagents/{name}/role.yaml` 文件定义，支持 `maxDepth=3` 的递归发现（`src/loader/subagents.ts:234-325`）
+1. **子代理继承可继承字段**：父角色的 `model`、`temperature`、`permission`、`tools` 等会自动传播，除非子代理显式覆盖
+2. **非继承字段需显式声明**：`skills`、`functions`、`prompt` 等不会从父角色传播，必须由子代理自行声明
+3. **嵌套继承**：内联子代理可以拥有自己的 `subagents`，形成递归嵌套（`src/loader/subagents.ts:142-181`）
+4. **文件式发现**：子代理可以通过 `subagents/{name}/role.yaml` 文件定义，支持 `maxDepth=3` 的递归发现（`src/loader/subagents.ts:235-326`）
 
 ```yaml
-# 父角色 — 声明 model 和 permission，但子代理不会继承
+# 父角色 — 声明 model 和 permission；子代理未声明时继承这些值
 name: Team Lead
 model: gpt-4
 permission:
@@ -264,9 +263,9 @@ permission:
 subagents:
   - name: Researcher
     description: Researches code patterns
-    model: claude-3-haiku       # 必须显式声明
+    model: claude-3-haiku       # 显式覆盖父角色的 model
     prompt: Research the code...
-    # Researcher 没有 Edit 权限 — 需要显式声明
+    # Researcher 未声明 permission → 继承父角色的 [Read, Grep, Glob, Bash, Edit]
 ```
 
 ## 权限配置
@@ -492,10 +491,10 @@ permission:
 ```
 
 **预期行为：**
-1. 代理可以阅读任意文件、搜索代码模式、使用 LSP 分析代码
+1. 代理可以阅读任意文件、搜索代码模式、使用 LSP（语言服务器协议，Language Server Protocol）分析代码
 2. 代理**不能**编辑文件、创建文件或运行命令
 3. `humanizer` 技能使其输出更接近人类写作风格（来源：`examples/tech-writer/role.yaml:6-7`）
-4. 适合与 `|plan|` 搭配使用："|plan| 阅读 API 模块并为新端点编写文档"
+4. 适合与 `|plan|` 搭配使用："|plan| 阅读 API（应用程序接口，Application Programming Interface）模块并为新端点编写文档"
 
 **出错时检查什么：**
 - `permission.deny` 中包含 `Edit`、`Write` 和 `Bash`，确保代理不会意外修改文件

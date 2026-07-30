@@ -5,7 +5,7 @@ description: 创建与管理注册中心 — GitHub 仓库结构、registry.yaml
 
 # 注册中心
 
-> **相关文档：** [CLI 参考](/03-Reference/cli) — 通过 `rolebox registry` 管理注册中心 | [role.yaml 参考](/03-Reference/role-yaml) — 角色定义参考 | [创建角色](/02-Guide/create-a-role) — 角色创建指南
+> **相关文档：** [CLI（命令行界面，Command-Line Interface）参考](/03-Reference/cli) — 通过 `rolebox registry` 管理注册中心 | [role.yaml 参考](/03-Reference/role-yaml) — 角色定义参考 | [创建角色](/02-Guide/create-a-role) — 角色创建指南
 
 注册中心是一个符合特定结构的 GitHub 仓库，用于发布和分发角色。
 
@@ -223,7 +223,7 @@ roles:
 
 | 角色 | 说明 |
 |---|---|
-| `emperor` | 顶层编排器，采用 Planner → Executor → Validator 架构 |
+| `emperor` | 顶层编排器（编排器 / Emperor = 顶层 AI 编排角色：把任务拆成计划、分派给专业子代理、再验证结果；它自己不写代码），采用 Planner → Executor → Validator 架构 |
 | `software-architect` | 系统设计与架构 |
 | `react-frontend` | React/Next.js 前端开发 |
 | `ai-designer` | AI 应用设计 |

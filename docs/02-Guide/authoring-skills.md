@@ -7,11 +7,11 @@ description: 创建和管理 SKILL.md 技能模块 — 格式、引用、解析�
 
 > **相关文档：** [技能系统](/02-Guide/skills) — 技能解析顺序与加载机制 | [引用文档](/02-Guide/references) — 引用文档的自动发现与声明 | [创建角色](/02-Guide/create-a-role) — 完整的角色创建指南
 
-技能是按需加载的知识模块。与函数不同（函数一旦激活就持续存在），技能通过 `skill` 工具在需要时按上下文加载。
+技能是按需加载的知识模块——这是"渐进式披露（progressive disclosure）"的体现：系统提示只展示技能的名称与描述，代理真正需要时才加载完整内容。与函数不同（函数一旦激活就持续存在），技能通过 `skill` 工具在需要时按上下文加载。
 
 ## SKILL.md 格式
 
-每个技能是一个带有 YAML frontmatter 的 Markdown 文件，文件必须命名为 `SKILL.md`。
+每个技能是一个带有 YAML frontmatter（即 Markdown 文件顶部用 `---` 包裹的元数据块）的 Markdown 文件，文件必须命名为 `SKILL.md`。
 
 ### 目录结构
 
@@ -347,12 +347,12 @@ description: OWASP 驱动的安全审查规则，覆盖认证、授权、输入�
 ### 输入验证
 - 所有用户输入是否在服务端验证（不仅是客户端）？
 - 是否对文件上传做了类型和大小限制？
-- 是否存在 SSRF 或路径遍历风险？
+- 是否存在 SSRF（服务端请求伪造，Server-Side Request Forgery）或路径遍历风险？
 
 ### 数据保护
 - 敏感数据是否在传输和存储时加密？
 - 日志中是否可能泄漏个人身份信息（PII）？
-- API 响应是否过度暴露内部数据结构？
+- API（应用程序接口，Application Programming Interface）响应是否过度暴露内部数据结构？
 ```
 
 这个引用文档会自动被 `resolveAllReferences` 发现（`src/resolver/reference-resolver.ts:97-128`），无需在 SKILL.md 中声明路径即可加载。这里在 frontmatter 中显式声明它，以便在加载时提供自定义描述。

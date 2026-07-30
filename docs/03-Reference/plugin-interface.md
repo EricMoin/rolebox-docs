@@ -7,7 +7,7 @@ description: Rolebox 插件系统的核心接口说明，包括 HookDeps、RoleC
 
 > **相关文档：** [扩展机制](/03-Reference/extensions) — 扩展系统 | [Hook 机制](/03-Reference/hooks) — Hook 接口 | [服务架构](/01-Overview/service-architecture) — PluginCore 生命周期
 
-Rolebox 插件系统基于 opencode 的 `PluginInput` 协议构建，通过一套分层接口实现角色解析、子代理管理、任务调度、通知、扩展等能力。本文档描述核心接口的生命周期与使用模式。
+本文档介绍 rolebox 的**插件接口**（Plugin Interface）——即第三方插件接入 rolebox 时使用的接口规范。插件系统基于 opencode 的 `PluginInput` 协议构建，通过一套分层接口实现角色解析、子代理管理、任务调度、通知、扩展等能力。本文将围绕这些核心接口的生命周期与使用模式展开：它们何时被创建、按什么顺序初始化、以及如何扩展。
 
 ## Quick Start：与 rolebox 集成
 
@@ -22,7 +22,7 @@ Rolebox 插件系统基于 opencode 的 `PluginInput` 协议构建，通过一�
 | 添加自定义回调逻辑 | `hooks.custom`（`role.yaml`） | [Hook 机制](./hooks) |
 | 扩展封闭词汇表（条件/策略/通道等） | `extensions`（`role.yaml`） | [扩展机制](./extensions) |
 | 实现完整的生命周期服务 | `PluginService` 接口 | [服务架构](/01-Overview/service-architecture) |
-| 注册自定义恢复策略 | `engine.registerStrategy()` | [错误处理](./error-handling#恢复系统-recovery-system) |
+| 注册自定义恢复策略（恢复策略 = 错误发生时自动执行的补救动作） | `engine.registerStrategy()` | [错误处理](./error-handling#恢复系统-recovery-system) |
 
 ### 2. 编写模块
 
@@ -51,13 +51,13 @@ hooks:
       module: hooks/hello-hook.js
 ```
 
-启动后，`PluginCore` 会自动发现并注册该 Hook，无需额外配置。
+启动后，`PluginCore`（rolebox 插件的核心容器对象：负责服务注册、事件总线与工具注册）会自动发现并注册该 Hook，无需额外配置。
 
-> 完整服务注册流程见[服务架构](/01-Overview/service-architecture#组合根)。
+> 完整服务注册流程见[服务架构](/01-Overview/service-architecture#组合根)（组合根 / composition root：程序启动时把所有依赖组件装配起来的位置）。
 
 ## 1. PluginService 接口
 
-所有子系统服务均实现 `PluginService` 接口（`src/core/service.ts:14`），由 `PluginCore` 按拓扑序统一初始化。
+所有子系统服务均实现 `PluginService` 接口（`src/core/service.ts:14`），由 `PluginCore` 按拓扑序（依赖优先的初始化顺序）统一初始化。
 
 ```typescript
 // src/core/service.ts:14
@@ -358,7 +358,7 @@ interface SubAgentConfig {
 }
 ```
 
-## 7. HookContext API
+## 7. HookContext API（应用程序接口，Application Programming Interface）
 
 Hook上下文提供了一组工具函数（`src/hooks/context.ts`），在Hook处理函数内部使用。
 

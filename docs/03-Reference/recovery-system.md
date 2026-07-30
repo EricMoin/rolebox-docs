@@ -11,6 +11,12 @@ description: rolebox 恢复系统详细架构 — RecoveryEngine、策略链、�
 
 恢复系统（Recovery System）是一个可插拔的错误恢复框架，用于拦截 Agent 运行时中的常见故障模式并自动执行补偿策略。它由 `RecoveryEngine` 统一管理，通过可配置的策略链（chain-of-strategies）将错误恢复逻辑与业务逻辑解耦。
 
+::: tip 先理解这几个词
+- **恢复策略**（recovery strategy）：错误发生时，系统自动执行的补救动作（重试、压缩上下文、换模型……）。
+- **策略链**（strategy chain）：把多个恢复策略按顺序串起来；错误发生时逐个尝试，直到恢复成功或链耗尽。
+- **错误检测**（error detection）：先判断当前错误属于哪一类（超时、token 超限、编辑失败……），再据此选择对应的策略链。
+:::
+
 ---
 
 ## 架构总览
@@ -165,7 +171,7 @@ interface RecoveryStrategy {
 - `attempt` — 当前策略内的重试次数（1-based）
 - `stepConfig` — 策略步骤的配置块
 - `inject(text)` — 向系统 prompt 追加文本
-- `client` — opencode 插件客户端实例（用于 API 调用）
+- `client` — opencode 插件客户端实例（用于 API（应用程序接口，Application Programming Interface）调用）
 
 返回值 `RecoveryStrategyResult`（`src/recovery/types.ts:246-250`）是判别联合体：
 

@@ -95,7 +95,7 @@ Emperor 的工作流程：
 rolebox list           # 列出所有已安装角色
 rolebox info <name>    # 查看角色详细信息
 rolebox sync           # 同步已安装角色与注册中心
-rolebox monitor        # 实时调度指标仪表盘 (TUI)
+rolebox monitor        # 实时调度指标仪表盘 (TUI，终端用户界面，Terminal User Interface)
 rolebox memory stats   # 查看记忆系统统计
 ```
 
@@ -155,7 +155,7 @@ Emperor 的工作模式：
 |------|------|------|
 | **规划** | 草案 → 审查 → 定稿 | 使用 `plan` 函数调研代码库，经三阶段审查后落地可执行计划 |
 | **调度** | 并行派发子任务 | 根据领域路由到 UI/后端/测试/数据/文档/质量部门 |
-| **验证** | 逐项验收 | 每步执行后运行 LSP 诊断和测试命令，形成闭环 |
+| **验证** | 逐项验收 | 每步执行后运行 LSP（语言服务器协议，Language Server Protocol）诊断和测试命令，形成闭环 |
 | **修正** | 最多 2 轮重调度 | 验证失败时，重新调度失败的子任务 |
 
 ## 常见问题排查
@@ -191,7 +191,7 @@ $ cd ~/.config/opencode && npm install rolebox
 $ npm bin -g
 ```
 
-同步至 opencode 前，`rolebox` CLI 独立于 opencode 运行。
+同步至 opencode 前，`rolebox` CLI（命令行界面，Command-Line Interface）独立于 opencode 运行。
 
 ### YAML 解析错误
 

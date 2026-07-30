@@ -5,7 +5,7 @@ description: 用户快速入门 — 安装、创建角色、使用场景；以�
 
 # 快速入门
 
-> **相关文档：** [快速概览](/01-Overview/quick-start) — 30秒快速体验 | [创建角色](/02-Guide/create-a-role) — 角色创建实战指南 | [CLI 使用](/03-Reference/cli) — 命令行工具参考 | [目录结构](/01-Overview/directory-structure) — 项目文件组织
+> **相关文档：** [快速概览](/01-Overview/quick-start) — 30秒快速体验 | [创建角色](/02-Guide/create-a-role) — 角色创建实战指南 | [CLI（命令行界面，Command-Line Interface）使用](/03-Reference/cli) — 命令行工具参考 | [目录结构](/01-Overview/directory-structure) — 项目文件组织
 
 rolebox 是一个 opencode 插件，可将一个 AI 编码助手转变为一支专业团队。定义角色、函数、技能和协作图，全部使用 YAML 配置，无需编写代码。
 
@@ -29,21 +29,28 @@ cd ~/.config/opencode && npm install rolebox
 **创建你的第一个角色：**
 
 ```bash
+cd ~/.config/opencode/rolebox   # 或任何你想放置角色的目录
 rolebox init my-agent -y
 ```
 
-一个可直接使用的角色目录将创建在 `~/.config/opencode/rolebox/my-agent/` 中。重启 opencode 后，从代理列表中选择 `my-agent` 即可开始使用。
+`rolebox init` 在当前工作目录下创建 `./my-agent/` 角色目录（`src/cli/commands/init.ts:50`）。随后部署到 opencode：
 
-**安装 Emperor 编排器**（可选，用于多代理协作）：
+```bash
+rolebox sync opencode
+```
+
+重启 opencode 后，从代理列表中选择 `my-agent` 即可开始使用。
+
+**安装 Emperor 编排器**（可选，用于多代理协作。编排器是顶层 AI 编排角色：把任务拆成计划、分派给专业子代理、再验证结果，它自己不写代码）：
 
 ```bash
 rolebox install emperor
 ```
 
-安装成功后，你的角色目录结构如下：
+安装成功后，你的角色目录结构如下（`rolebox init` 生成）：
 
 ```
-~/.config/opencode/rolebox/my-agent/
+./my-agent/
 ├── role.yaml           # 角色配置（名称、技能、函数等）
 ├── functions/          # 函数定义
 ├── skills/             # 技能定义
@@ -61,7 +68,7 @@ rolebox install emperor
 | `minimal` | 简单单角色，仅需 YAML 配置与提示词文件 | 快速原型、个人工具角色、无需子代理或技能的独立任务 |
 | `standard` | 标准角色，附带 functions/、skills/、references/ 目录 | 多数场景的默认选择，为后续扩展预留完整目录结构 |
 | `subagents` | 父角色 + 子代理，通过 `task()` 派发任务 | 需要分工协作（如研究 → 写作 → 审校），子代理各有专用提示词 |
-| `collaboration` | 多代理协作图，具备内置拓扑（pipeline / review-loop / star） | 需要结构化工作流编排，代理间有明确的传递顺序和循环规则 |
+| `collaboration` | 多代理协作图，具备内置拓扑（即协作图的预设结构模式：pipeline 串行 / review-loop 循环 / star 并行） | 需要结构化工作流编排，代理间有明确的传递顺序和循环规则 |
 
 选择策略：以 `standard` 作为起点，按需逐步升级；当角色需要拆分任务时改为 `subagents`；当需要自动化工作流路由时改为 `collaboration`。
 
@@ -99,7 +106,7 @@ bun run build:tui      # 仅构建 TUI 子系统 (scripts/build-tui.ts)
 bun run typecheck      # 仅类型检查 (tsc --noEmit)，不含输出
 ```
 
-`build` 脚本定义于 `package.json:36`，先后执行 `tsc` 和 `bun run build:tui`。TUI 构建脚本位于 `scripts/build-tui.ts`。
+`build` 脚本定义于 `package.json:36`，先后执行 `tsc` 和 `bun run build:tui`。TUI（终端用户界面，Terminal User Interface）构建脚本位于 `scripts/build-tui.ts`。
 
 ### 运行测试
 

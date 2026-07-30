@@ -7,7 +7,7 @@ description: rolebox 模块职责与数据流概览
 
 > **相关文档：** [开发环境搭建](/05-Contributing/development-setup) — 构建和测试指南 | [贡献指南](/05-Contributing/contributing) — PR 流程和代码规范 | [系统架构](/01-Overview/architecture-overview) — 用户视角的系统架构概述
 
-本文档面向贡献者，描述核心模块的职责和数据流。
+rolebox 是一个基于 TypeScript 构建的 AI 代理编排框架：把复杂任务拆给多个子代理分工协作执行。本文档面向贡献者，梳理核心模块的职责和数据流，帮你在改代码前先建立整体认知。
 
 ## 模块地图
 
@@ -170,7 +170,7 @@ core/  ←──  所有上游模块（hooks, dispatch, loop, session, ...）
 | 模块 | 依赖方 | 依赖类型 |
 |------|--------|----------|
 | `core/` | hooks, dispatch, loop, function, graph, session, memory, lsp, asset, platform, extensions, notifications, prompt, recovery | 基础设施 — 服务注册、事件总线、状态注册表 |
-| `dispatch/` | hooks (核心调用), loop (子代理派发), extensions (条件注册), tool-service | 调度引擎 — 并发控制、预算、检查点 |
+| `dispatch/` | hooks (核心调用), loop (子代理派发), extensions (条件注册), tool-service | 调度引擎 — 并发控制、预算、检查点（进度快照） |
 | `function/` | hooks (chat-message, system-transform), prompt (builder) | 函数状态机 — 解析、门控、观察 |
 | `recovery/` | dispatch (错误恢复), extensions (策略注册) | 恢复引擎 — 模式匹配、策略链 |
 | `graph/` | hooks (tool-after 图推进), extensions (拓扑注册) | 协作图引擎 — 验证、终止 |
