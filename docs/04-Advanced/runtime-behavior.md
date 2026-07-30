@@ -7,22 +7,24 @@ description: rolebox 协作图运行时状态管理、dispatch 驱动的前沿�
 
 > **相关文档：** [工作流模式](/04-Advanced/workflow-patterns) — 拓扑模板与展开 | [终止条件](/04-Advanced/termination-conditions) — 循环终止与超时 | [信号系统](/04-Advanced/signal-system) — 运行时信号控制
 
-协作图在解析和校验完成后进入运行时阶段。`src/graph/state.ts` 中的 `GraphSessionState` 是运行时核心，管理所有活跃会话的图状态、前沿推进和持久化。
+协作图定义好了拓扑（协作图的预设结构模式：pipeline 串行、review-loop 循环、star 并行）和终止条件，真正跑起来就进入『运行时』阶段。本文解释运行时如何记录每个会话的进度、如何在每一步派发后推进状态、以及如何把状态存盘以便崩溃后恢复。
+
+协作图在解析和校验完成后进入运行时阶段。`src/graph/collaboration-state.ts` 中的 `GraphSessionState` 是运行时核心，管理所有活跃会话的图状态、前沿推进和持久化。
 
 ---
 
 ::: warning 状态持久化说明
-协作图的状态会持久化到 `.rolebox/state/graph-{hash}.json` 文件中。如果手动删除该文件，运行中的协作会话将丢失当前进度。在正常关闭时，`GraphSessionState` 会自动保存状态；在意外崩溃情况下，未保存的迭代可能会在下次启动时丢失。
+协作图的状态会持久化到 `.rolebox/state/collaboration-{dirHash}.json` 文件中。如果手动删除该文件，运行中的协作会话将丢失当前进度。在正常关闭时，`GraphSessionState` 会自动保存状态；在意外崩溃情况下，未保存的迭代可能会在下次启动时丢失。
 :::
 
 ## 1. 图状态初始化
 
 ### 状态数据结构
 
-每个协作会话维护一个 `GraphExecutionState` 对象（`src/graph/state.ts:10-21`）：
+每个协作会话维护一个 `GraphExecutionState` 对象（`src/graph/collaboration-state.ts:10-21`）：
 
 ```typescript
-// src/graph/state.ts:10-21
+// src/graph/collaboration-state.ts:10-21
 export interface GraphExecutionState {
   frontier: string[];                     // 当前可派发的代理队列
   completed: string[];                    // 已完成代理列表
@@ -39,10 +41,10 @@ export interface GraphExecutionState {
 
 ### initGraph 流程
 
-当会话启动时，`initGraph`（`src/graph/state.ts:47-73`）根据图的边初始化 frontier：
+当会话启动时，`initGraph`（`src/graph/collaboration-state.ts:47-73`）根据图的边初始化 frontier：
 
 ```typescript
-// src/graph/state.ts:47-57
+// src/graph/collaboration-state.ts:47-57
 initGraph(sessionID: string, graph: ResolvedGraph, agentId?: string): void {
   const frontier: string[] = [];
   for (const e of graph.edges) {
@@ -67,13 +69,13 @@ initGraph(sessionID: string, graph: ResolvedGraph, agentId?: string): void {
 }
 ```
 
-初始化完成后，frontier 包含所有从 `parent`（Orchestrator）出发的直接下游代理。
+初始化完成后，frontier 包含所有从 `parent`（协作图保留名，指编排器/父角色的固定节点）出发的直接下游代理。
 
 ---
 
 ## 2. `<collaboration_graph>` 注入机制
 
-协作图指令通过 `buildCollaborationBlock`（`src/graph/prompt-builder.ts:298-349`）生成 XML 格式的提示块，注入到路由器（Orchestrator）的系统提示中。
+协作图指令通过 `buildCollaborationBlock`（`src/graph/prompt-builder.ts:298-349`）生成 XML 格式的提示块，**注入**（injection，把指令块拼接到大模型系统提示中）到路由器（Orchestrator）的系统提示中。
 
 ### 生成的 XML 结构
 
@@ -115,7 +117,7 @@ if (isExitPoint) {
 
 ### 运行时状态块
 
-在工作流执行过程中，`buildGraphStateBlock`（`src/graph/state.ts:252-313`）生成当前状态的 XML 块用于注入系统提示：
+在工作流执行过程中，`buildGraphStateBlock`（`src/graph/collaboration-state.ts:252-313`）生成当前状态的 XML 块用于注入系统提示：
 
 ```xml
 <collaboration_state>
@@ -127,7 +129,7 @@ if (isExitPoint) {
 </collaboration_state>
 ```
 
-当终止时，该块包含终止原因和循环计数（`src/graph/state.ts:261-288`）：
+当终止时，该块包含终止原因和循环计数（`src/graph/collaboration-state.ts:261-288`）：
 
 ```xml
 <collaboration_state>
@@ -147,10 +149,10 @@ if (isExitPoint) {
 
 ### advanceGraphForDispatch
 
-每次路由器执行 `dispatch`（task 或 dispatch 工具）后，`advanceGraphForDispatch`（`src/graph/advance.ts:96-151`）推进图状态：
+每次路由器执行 `dispatch`（task 或 dispatch 工具）后，`advanceGraphForDispatch`（`src/graph/collaboration-advance.ts:97-155`）推进图状态：
 
 ```typescript
-// src/graph/advance.ts:96-103
+// src/graph/collaboration-advance.ts:97-104
 export function advanceGraphForDispatch(
   sessionID: string, tool: string, args: unknown,
 ): { result: AdvanceResult; correction?: string } {
@@ -163,10 +165,10 @@ export function advanceGraphForDispatch(
 
 ### 目标提取
 
-`extractDispatchTarget`（`src/graph/advance.ts:47-86`）从工具调用参数中提取派发目标。支持 `task` 和 `dispatch` 两种工具，参数可以是结构化对象或字符串：
+`extractDispatchTarget`（`src/graph/collaboration-advance.ts:48-87`）从工具调用参数中提取派发目标。支持 `task` 和 `dispatch` 两种工具，参数可以是结构化对象或字符串：
 
 ```typescript
-// src/graph/advance.ts:47-62
+// src/graph/collaboration-advance.ts:48-65
 export function extractDispatchTarget(tool: string, args: unknown): string | undefined {
   if (typeof args === "object" && args !== null) {
     if (tool === "task") return (args as Record<string, unknown>).subagent_type;
@@ -178,7 +180,7 @@ export function extractDispatchTarget(tool: string, args: unknown): string | und
 
 ### advanceStep 核心逻辑
 
-`advanceStep`（`src/graph/state.ts:75-172`）执行完整的推进逻辑：
+`advanceStep`（`src/graph/collaboration-state.ts:75-172`）执行完整的推进逻辑：
 
 1. **校验**：确认会话存在、状态为 `active`、目标在节点列表中、目标在 frontier 中
 2. **前沿管理**：从 frontier 移除已完成代理，将其加入 `completed` 列表
@@ -187,7 +189,7 @@ export function extractDispatchTarget(tool: string, args: unknown): string | und
 5. **终止评估**：调用 `evaluateSync` 检查是否满足终止条件
 
 ```typescript
-// src/graph/state.ts:75-84
+// src/graph/collaboration-state.ts:75-84
 advanceStep(sessionID: string, completedAgent: string): AdvanceResult {
   const entry = this.sessions.get(sessionID);
   if (!entry) return { kind: "ignored" };
@@ -200,10 +202,10 @@ advanceStep(sessionID: string, completedAgent: string): AdvanceResult {
 
 ### AdvanceResult 类型
 
-推进操作返回 6 种可能结果（`src/graph/state.ts:23-29`）：
+推进操作返回 6 种可能结果（`src/graph/collaboration-state.ts:23-29`）：
 
 ```typescript
-// src/graph/state.ts:23-29
+// src/graph/collaboration-state.ts:23-29
 export type AdvanceResult =
   | { kind: "advanced"; frontier: string[] }     // 正常推进，有后继
   | { kind: "completed" }                          // 正常完成（frontier 为空）
@@ -215,12 +217,12 @@ export type AdvanceResult =
 
 ### off_route 修正
 
-当路由器派发了错误的代理时，`advanceGraphForDispatch` 会生成 `<system-reminder>` 修正提示（`src/graph/advance.ts:110-126`）：
+当路由器派发了错误的代理时，`advanceGraphForDispatch` 会生成 `<system-reminder>` 修正提示（`src/graph/collaboration-advance.ts:111-131`）：
 
 ```typescript
-// src/graph/advance.ts:115-125
+// src/graph/collaboration-advance.ts:116-129
 if (state.correctionCount >= MAX_CORRECTIONS) {
-  // MAX_CORRECTIONS = 3（advance.ts:8）
+  // MAX_CORRECTIONS = 3（collaboration-advance.ts:9）
   correction = `<system-reminder>
 The workflow has terminated due to repeated off-route dispatches. Stop dispatching and
 synthesize the best final result from the completed agents' work.
@@ -255,10 +257,10 @@ export type TerminationReason =
 
 ### 终止触发后的状态变迁
 
-`advanceStep` 在每次前沿更新后调用 `evaluateSync`（`src/graph/state.ts:138-146`）：
+`advanceStep` 在每次前沿更新后调用 `evaluateSync`（`src/graph/collaboration-state.ts:138-146`）：
 
 ```typescript
-// src/graph/state.ts:138-146
+// src/graph/collaboration-state.ts:138-146
 const reason = evaluateSync(state, graph, Date.now());
 if (reason) {
   state.terminationReason = reason;
@@ -272,14 +274,14 @@ if (reason) {
 
 两种状态的区别：
 - **`complete`**：`converged` 或 `result_match` 触发，表示工作流成功完成
-- **`exhausted`**：`max_iterations`、`timeout`、`stuck`、`error` 触发，表示非正常但安全的终止
+- **`exhausted`**：`max_iterations`（循环最大轮数上限，防止死循环）、`timeout`、`stuck`、`error` 触发，表示非正常但安全的终止
 
 ### 空 frontier 自动完成
 
-当 frontier 变为空且无活跃出口边时，图自动进入 `complete` 状态（`src/graph/state.ts:158-169`）：
+当 frontier 变为空且无活跃出口边时，图自动进入 `complete` 状态（`src/graph/collaboration-state.ts:158-169`）：
 
 ```typescript
-// src/graph/state.ts:158-169
+// src/graph/collaboration-state.ts:158-169
 if (state.frontier.length === 0) {
   if (forward.length > 0 && skippedLoopDueToCap && exitEdges.length === 0) {
     state.status = "exhausted";
@@ -306,7 +308,7 @@ graph TD
     ACTIVE -->| evaluateSync() \nmax_iterations / timeout / stuck / error| EXHAUSTED["exhausted\n⚠ 保护性终止"]
     ACTIVE -->| evaluateSync() \nconverged / result_match| COMPLETE
 
-    COMPLETE -->|状态持久化| PERSIST["持久化到磁盘\n.rolebox/state/graph-*.json"]
+    COMPLETE -->|状态持久化| PERSIST["持久化到磁盘\n.rolebox/state/collaboration-*.json"]
     EXHAUSTED -->|状态持久化| PERSIST
 
     PERSIST -->| recover() \n下次启动| RECOVER["恢复 / 重连"]
@@ -343,24 +345,24 @@ graph TD
 
 ### 锁定语义
 
-一旦状态离开 `active`，所有后续 `advanceStep` 调用都被忽略（`src/graph/state.ts:79`）：
+一旦状态离开 `active`，所有后续 `advanceStep` 调用都被忽略（`src/graph/collaboration-state.ts:79`）：
 
 ```typescript
 if (state.status !== "active") return { kind: "ignored" };
 ```
 
-同样，`advanceGraphForDispatch` 在进入前也检查 active 状态（`src/graph/advance.ts:103`）。
+同样，`advanceGraphForDispatch` 在进入前也检查 active 状态（`src/graph/collaboration-advance.ts:104`）。
 
 ### 持久化
 
-`GraphSessionState` 支持将运行时状态持久化到磁盘，通过 `GraphStore`（`src/graph/graph-store.ts`）：
+`GraphSessionState` 支持将运行时状态持久化到磁盘，通过 `GraphStore`（`src/graph/collaboration-store.ts`）：
 
-- **异步写入**：`_persist()` — 状态变更后 500ms 延迟批量写入（`state.ts:201-215`），避免高频写入
-- **同步写入**：`flushSync()` — 确保立即写入磁盘（`state.ts:217-231`）
-- **恢复**：`recover()` 方法从磁盘加载并重连已持久化的图（`state.ts:233-247`）
+- **异步写入**：`_persist()` — 状态变更后 500ms 延迟批量写入（`collaboration-state.ts:201-215`），避免高频写入
+- **同步写入**：`flushSync()` — 确保立即写入磁盘（`collaboration-state.ts:217-231`）
+- **恢复**：`recover()` 方法（从持久化状态恢复中断的会话，避免重复已完成的工作）从磁盘加载并重连已持久化的图（`collaboration-state.ts:233-247`）
 
 ```typescript
-// src/graph/state.ts:233-247
+// src/graph/collaboration-state.ts:233-247
 recover(reattach: (sessionID: string, agentId: string) => ResolvedGraph | undefined): void {
   if (!this.store) return;
   const loaded = this.store.load();
@@ -374,11 +376,11 @@ recover(reattach: (sessionID: string, agentId: string) => ResolvedGraph | undefi
 }
 ```
 
-持久化的文件位于 `.rolebox/state/graph-<dirHash>.json`（`src/graph/graph-store.ts:127`），包含 V2 格式的序列化状态。
+持久化的文件位于 `.rolebox/state/collaboration-<dirHash>.json`（`src/graph/collaboration-store.ts:127`），包含 V2 格式的序列化状态。
 
 ### 清理
 
-会话完成后调用 `clear(sessionID)` 从内存和磁盘中移除状态（`state.ts:188-191`）。
+会话完成后调用 `clear(sessionID)` 从内存和磁盘中移除状态（`collaboration-state.ts:188-191`）。
 
 ---
 
@@ -386,24 +388,24 @@ recover(reattach: (sessionID: string, agentId: string) => ResolvedGraph | undefi
 
 | 引用 | 文件 | 行号 |
 |------|------|------|
-| 状态数据结构 | `src/graph/state.ts` | 10-21 |
-| initGraph | `src/graph/state.ts` | 47-73 |
-| advanceStep | `src/graph/state.ts` | 75-172 |
-| AdvanceResult 类型 | `src/graph/state.ts` | 23-29 |
-| 状态构建块 | `src/graph/state.ts` | 252-313 |
-| 持久化（异步 `_persist`） | `src/graph/state.ts` | 201-215 |
-| 持久化（同步 `flushSync`） | `src/graph/state.ts` | 217-231 |
-| recover | `src/graph/state.ts` | 233-247 |
+| 状态数据结构 | `src/graph/collaboration-state.ts` | 10-21 |
+| initGraph | `src/graph/collaboration-state.ts` | 47-73 |
+| advanceStep | `src/graph/collaboration-state.ts` | 75-172 |
+| AdvanceResult 类型 | `src/graph/collaboration-state.ts` | 23-29 |
+| 状态构建块 | `src/graph/collaboration-state.ts` | 252-313 |
+| 持久化（异步 `_persist`） | `src/graph/collaboration-state.ts` | 201-215 |
+| 持久化（同步 `flushSync`） | `src/graph/collaboration-state.ts` | 217-231 |
+| recover | `src/graph/collaboration-state.ts` | 233-247 |
 | 协作块生成 | `src/graph/prompt-builder.ts` | 298-349 |
 | 子代理角色块 | `src/graph/prompt-builder.ts` | 358-398 |
 | 结果契约 | `src/graph/prompt-builder.ts` | 285-287 |
-| advanceGraph | `src/graph/advance.ts` | 96-151 |
-| 目标提取 | `src/graph/advance.ts` | 47-86 |
-| off-route 修正 | `src/graph/advance.ts` | 110-126 |
-| 异步收敛 | `src/graph/advance.ts` | 161-219 |
+| advanceGraph | `src/graph/collaboration-advance.ts` | 97-155 |
+| 目标提取 | `src/graph/collaboration-advance.ts` | 48-87 |
+| off-route 修正 | `src/graph/collaboration-advance.ts` | 111-131 |
+| 异步收敛 | `src/graph/collaboration-advance.ts` | 165-223 |
 | 终止原因类型 | `src/types.graph.ts` | 83-89 |
 | 终止评估 | `src/graph/termination.ts` | 82-116 |
-| 图存储 | `src/graph/graph-store.ts` | 23-174 |
+| 图存储 | `src/graph/collaboration-store.ts` | 23-174 |
 
 ## 下一步
 

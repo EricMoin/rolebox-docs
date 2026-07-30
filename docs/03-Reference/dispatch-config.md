@@ -5,9 +5,17 @@ description: 调度（Dispatch）配置参考 — role.yaml dispatch 块、环�
 
 # 调度配置
 
-> **相关文档：** [CLI 参考](/03-Reference/cli) — 通过命令行管理角色和注册中心 | [role.yaml 参考](/03-Reference/role-yaml) — 完整的 role.yaml 字段参考 | [子代理](/02-Guide/subagents) — 子代理声明与调度基础
+> **相关文档：** [CLI（命令行界面，Command-Line Interface）参考](/03-Reference/cli) — 通过命令行管理角色和注册中心 | [role.yaml 参考](/03-Reference/role-yaml) — 完整的 role.yaml 字段参考 | [子代理](/02-Guide/subagents) — 子代理声明与调度基础
 
-本文档描述子代理调度系统的配置方式，包括 `role.yaml` 中的 `dispatch:` 块和全局环境变量覆盖。
+当一个角色需要把任务分派给多个子代理并行执行时，就要用到**调度（dispatch）**——它决定谁在何时、以何种并发度运行。本文档说明如何配置这套调度系统：既可以在 `role.yaml` 的 `dispatch:` 块里调并发、排队、背压、超时等参数，也可以用全局环境变量覆盖默认值。
+
+::: tip 术语速览
+- **调度/派发（dispatch）** — 把一个角色的任务分派给子代理去执行的过程。
+- **预算（dispatch budget）** — 一次任务允许消耗的总 token/费用上限；耗尽后禁止新的派发。
+- **背压（backpressure）** — 当并发槽位满载时，通过排队/延迟重试让调用方"慢下来"再试的保护机制。
+- **注册中心（registry）** — 用于发布和分发角色的 GitHub 仓库。
+- **拓扑（topology）** — 协作图的预设结构模式：pipeline（串行）、review-loop（循环）、star（并行）。
+:::
 
 ## 调度架构总览
 
@@ -93,12 +101,6 @@ dispatch:
   syncReservedSlots: number         # 预留给同步调度的槽位数（默认：1）
   maxActivePerParent: number        # 每个父会话最大活跃任务数（默认：3）
   maxTotalSessionsPerRequest: number # 每次用户请求最大累积会话数（默认：无限制 / 按需启用）
-  maxInputTokensPerRequest: number  # 每次请求最大累积输入 token 数（默认：无限制 / 按需启用）
-  maxOutputTokensPerRequest: number # 每次请求最大累积输出 token 数（默认：无限制 / 按需启用）
-  maxCostPerRequest: number         # 每次请求最大累积费用（USD）（默认：无限制 / 按需启用）
-  maxInputTokensPerSession: number  # 每个调度会话最大输入 token 数（默认：无限制 / 按需启用）
-  maxCostPerSession: number         # 每个调度会话最大费用（USD）（默认：无限制 / 按需启用）
-  budgetSampleIntervalMs: number    # 预算采样间隔（毫秒）（默认：30000）
   backgroundStaleTimeoutMs: number  # 后台任务过期超时（毫秒）（默认：900000）
   syncAcquireTimeoutMs: number      # 同步槽位获取超时（毫秒）（默认：120000）
   syncPromptTimeoutMs: number       # 同步提示词超时（毫秒）（默认：600000）
@@ -106,6 +108,15 @@ dispatch:
   backpressureMaxRetries: number    # 最大背压重试次数（默认：5）
   backpressureMaxDelayMs: number    # 最大背压延迟（毫秒）（默认：60000）
 ```
+
+> **注意：** `dispatch:` 块只接受 **11 个并发 / 队列 / 背压 / 超时字段**。预算类字段（`maxInputTokensPerRequest`、`maxOutputTokensPerRequest`、`maxCostPerRequest`、`maxInputTokensPerSession`、`maxCostPerSession`、`budgetSampleIntervalMs`）**不属于** `role.yaml` 表面——它们只存在于 `DispatchManagerConfig`，必须通过编程式 `configOverrides` 注入。在 `dispatch:` 块中声明这些字段会被**静默忽略**。
+
+::: tip 源码定位
+- 实现位置：`DispatchRoleConfig`（`dispatch:` 块接受的 11 个字段）见 `src/types.dispatch.ts:6-29`
+- 实现位置：`dispatch:` 块解析白名单见 `src/loader/role-loader.ts:170-182`
+- 实现位置：`DispatchManagerConfig` 字段定义见 `src/dispatch/config.ts:153-163`
+- 实现位置：`configOverrides` 注入见 `src/dispatch/factory.ts:134-136`
+:::
 
 ### 字段详解
 
@@ -118,36 +129,43 @@ dispatch:
 #### `maxActivePerParent`
 限制每个父会话（parent session）在同一个模型密钥上可以拥有的最大活跃任务数（`src/dispatch/concurrency/concurrency.ts:254-258`）。超过此限制时，即使全局槽位有空闲，该父会话的请求也会被排队，防止单个父会话独占并发资源。
 
-#### `budgetSampleIntervalMs`
-预算采样器定期检查各子代理会话的 token 消耗和费用的间隔（毫秒）（`src/dispatch/budget/budget-sampler.ts:7-21`）。当设置了 `maxInputTokensPerRequest`、`maxCostPerRequest` 等预算限制后，此采样器按此间隔轮询运行中的会话，一旦超限立即取消任务。默认 30000 毫秒（30 秒）。
+> **预算字段（不属于 `dispatch:` 块）：** `maxInputTokensPerRequest`、`maxOutputTokensPerRequest`、`maxCostPerRequest`、`maxInputTokensPerSession`、`maxCostPerSession`、`budgetSampleIntervalMs` 是 `DispatchManagerConfig` 的字段（`src/dispatch/config.ts:153-163`），只能通过编程式 `configOverrides` 注入，不能写进 `role.yaml` 的 `dispatch:` 块。详见下方「预算配置（编程式）」。
 
-### 预算配置示例
+### 预算配置（编程式）
 
-以下示例同时设置了 token 和 cost 两种预算限制，两者同时生效：
+预算限制与采样间隔由 `BudgetTracker` 与 `BudgetSampler` 实现，字段定义在 `DispatchManagerConfig`。它们**不能**通过 `role.yaml` 的 `dispatch:` 块配置——解析器只接受 11 个并发 / 队列 / 背压 / 超时字段，预算字段会被静默忽略。
 
-```yaml
-dispatch:
-  # 并发控制
-  maxConcurrent: 8
-  syncReservedSlots: 2
+::: tip 源码定位
+- 实现位置：`BudgetTracker` 见 `src/dispatch/budget/budget-tracker.ts`；`BudgetSampler` 见 `src/dispatch/budget/budget-sampler.ts:7-21`
+- 实现位置：`DispatchManagerConfig` 字段定义见 `src/dispatch/config.ts:153-163`
+- 实现位置：`dispatch:` 块解析白名单见 `src/loader/role-loader.ts:170-182`
+:::
 
-  # 请求级预算（累计所有子代理会话）
-  maxInputTokensPerRequest: 100000   # 10万 token
-  maxOutputTokensPerRequest: 50000   # 5万 token
-  maxCostPerRequest: 0.5             # 0.5 USD
+要启用预算限制，必须通过编程式 `configOverrides` 注入 `DispatchManagerConfig`。在 `src/dispatch/factory.ts:129-136`，合并顺序为：默认值 → 角色 `dispatchConfig` → 环境变量 → `configOverrides`，后者优先级最高：
 
-  # 会话级预算（单个子代理会话）
-  maxInputTokensPerSession: 50000    # 5万 token
-  maxCostPerSession: 0.25            # 0.25 USD
+```typescript
+// src/dispatch/factory.ts — createDispatchManager 的 configOverrides 注入
+import { createDispatchManager } from "./dispatch/factory.ts";
+import type { DispatchManagerConfig } from "./dispatch/config.ts";
 
-  # 采样间隔
-  budgetSampleIntervalMs: 15000      # 15秒采样一次
+const overrides: Partial<DispatchManagerConfig> = {
+  maxInputTokensPerRequest: 100_000,   // 10万 token
+  maxOutputTokensPerRequest: 50_000,   // 5万 token
+  maxCostPerRequest: 0.5,              // 0.5 USD
+  maxInputTokensPerSession: 50_000,    // 5万 token
+  maxCostPerSession: 0.25,             // 0.25 USD
+  budgetSampleIntervalMs: 15_000,      // 15秒采样一次
+};
+
+// 在 createDispatchManager 的其余选项（sessionClient / resolvedRoles /
+// storeDirectory 等）之外传入 configOverrides：
+const { manager } = await createDispatchManager({ /* ... */ configOverrides: overrides });
 ```
 
-当任意一个限制被触发时，系统会通过 `BudgetTracker.isRequestBudgetExceeded()`（`src/dispatch/budget/budget-tracker.ts:148-176`）检测到超限，并自动取消超限的任务。
+当任意一个限制被触发时，`BudgetTracker.isRequestBudgetExceeded()`（`src/dispatch/budget/budget-tracker.ts:148-176`）会检测到超限，并自动取消超限的任务。
 
 ::: tip 环境变量覆盖优先级
-配置的合并优先级为：**环境变量 > `role.yaml` 中的 `dispatch:` 块 > 系统默认值**（`src/dispatch/config.ts:289-298` 中的 `mergeConfig()` 函数）。
+配置的合并优先级为：**环境变量 > `role.yaml` 中的 `dispatch:` 块 > 系统默认值**（`src/dispatch/config.ts:308-318` 中的 `mergeConfig()` 函数）。
 :::
 
 ## 调度环境变量
@@ -165,13 +183,9 @@ dispatch:
 | `ROLEBOX_DISPATCH_BG_STALE_MS` | 后台任务过期超时（毫秒） | 900000 |
 | `ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS` | 结果获取超时（毫秒） | 10000 |
 | `ROLEBOX_DISPATCH_RESULT_RETENTION_MS` | 结果文件保留时间（毫秒） | 3600000 |
-| `ROLEBOX_DISPATCH_MAX_INPUT_TOKENS_PER_REQUEST` | 每次请求最大累积输入 token 数 | 无限制 / 按需启用 |
-| `ROLEBOX_DISPATCH_MAX_OUTPUT_TOKENS_PER_REQUEST` | 每次请求最大累积输出 token 数 | 无限制 / 按需启用 |
-| `ROLEBOX_DISPATCH_MAX_COST_PER_REQUEST` | 每次请求最大累积费用（USD） | 无限制 / 按需启用 |
-| `ROLEBOX_DISPATCH_MAX_INPUT_TOKENS_PER_SESSION` | 每个调度会话最大输入 token 数 | 无限制 / 按需启用 |
-| `ROLEBOX_DISPATCH_MAX_COST_PER_SESSION` | 每个调度会话最大费用（USD） | 无限制 / 按需启用 |
-| `ROLEBOX_DISPATCH_BUDGET_SAMPLE_INTERVAL_MS` | 预算采样间隔（毫秒） | 30000 |
 | `ROLEBOX_METRICS` | 启用调度指标收集（设为任意真值） | 未设置 |
+
+> **注意：** 上表仅列出 `resolveEnvConfig()`（`src/dispatch/config.ts:257-296`）实际解析的 9 个 `ROLEBOX_DISPATCH_*` 变量。预算字段（token / cost 上限、`budgetSampleIntervalMs`）**不支持**环境变量配置，必须通过编程式 `configOverrides` 注入（见上方「预算配置（编程式）」）。`ROLEBOX_METRICS` 是独立于 `resolveEnvConfig` 的指标采集开关（`src/dispatch/persistence/metrics.ts:156`）。
 
 ## 环境变量插值
 
@@ -201,7 +215,7 @@ prompt: |
 优先级低
 ```
 
-合并逻辑在 `src/dispatch/config.ts:289-298` 的 `mergeConfig()` 函数中实现：环境变量值会覆盖 `role.yaml` 中的对应字段，`role.yaml` 中未指定的字段回退到系统默认值。
+合并逻辑在 `src/dispatch/config.ts:308-318` 的 `mergeConfig()` 函数中实现：环境变量值会覆盖 `role.yaml` 中的对应字段，`role.yaml` 中未指定的字段回退到系统默认值。
 
 > `role.yaml` 中的 `dispatch:` 块也支持 `{env:VARIABLE_NAME}` 环境变量插值，详见上方「环境变量插值」小节。
 
@@ -277,6 +291,8 @@ Tier 1 看门狗调用 `onReconcile()` 回调重置任务状态；Tier 2 全局 
 
 根据使用场景的不同，以下提供了四种推荐配置模式。
 
+> **注意：** 以下预设中的预算字段（`maxInputTokensPerRequest`、`maxOutputTokensPerRequest`、`maxCostPerRequest`、`maxInputTokensPerSession`、`maxCostPerSession`、`budgetSampleIntervalMs`）不属于 `role.yaml` 的 `dispatch:` 块。下述 YAML 仅展示 `dispatch:` 块可接受的并发 / 队列 / 背压 / 超时字段；预算限制需按上方「预算配置（编程式）」通过 `configOverrides` 注入。
+
 ### 保守型（Conservative）
 
 适用于预算敏感或个人使用场景：严格控制并发和费用，避免意外消耗。
@@ -287,14 +303,10 @@ dispatch:
   syncReservedSlots: 0
   maxQueueDepth: 5
   maxActivePerParent: 2
-  maxInputTokensPerRequest: 50000
-  maxOutputTokensPerRequest: 25000
-  maxCostPerRequest: 0.15
-  budgetSampleIntervalMs: 10000
   backgroundStaleTimeoutMs: 300000
 ```
 
-特点：低并发（3 个槽位）、紧预算（单请求 0.15 USD）、快速采样（10 秒间隔），适合开发环境或个人工作站。
+特点：低并发（3 个槽位）；配合编程式预算上限（如单请求 0.15 USD、10 秒采样间隔），适合开发环境或个人工作站。
 
 ### 吞吐型（Throughput）
 
@@ -306,15 +318,11 @@ dispatch:
   syncReservedSlots: 2
   maxQueueDepth: 30
   maxActivePerParent: 6
-  maxInputTokensPerRequest: 500000
-  maxOutputTokensPerRequest: 200000
-  maxCostPerRequest: 2.0
-  budgetSampleIntervalMs: 60000
   backpressureMaxRetries: 10
   backpressureMaxDelayMs: 120000
 ```
 
-特点：高并发（16 个槽位）、松预算（单请求 2 USD）、长采样间隔（60 秒），适合 CI/CD 管道或批量处理。
+特点：高并发（16 个槽位）、宽背压上限（10 次）；配合编程式松预算（如单请求 2 USD、60 秒采样间隔），适合 CI/CD 管道或批量处理。
 
 ### 交互型（Interactive）
 
@@ -342,16 +350,12 @@ dispatch:
   syncReservedSlots: 1
   maxQueueDepth: 8
   maxActivePerParent: 2
-  maxInputTokensPerRequest: 100000
-  maxCostPerRequest: 0.3
-  maxCostPerSession: 0.1
-  budgetSampleIntervalMs: 15000
   backpressureMaxRetries: 3
   backpressureMaxDelayMs: 30000
   retryAfterMs: 60000
 ```
 
-特点：严格的并发和预算限制、较低的背压重试上限（3 次）、较长的失败重试间隔（60 秒），外加会话级预算保护。
+特点：严格的并发限制、较低的背压重试上限（3 次）、较长的失败重试间隔（60 秒）；配合编程式请求级与会话级预算保护。
 
 ### 预设选型决策矩阵
 
@@ -390,7 +394,7 @@ class QueueFullError extends Error {
 2. **检查同步预留** — 后台任务可用槽位为 `maxConcurrent - syncReservedSlots`。如果 `syncReservedSlots` 设置过高，后台槽位可能被过度挤压
 3. **扩容量** — 在 `role.yaml` 中增加 `maxConcurrent`（增加总槽位）和/或 `maxQueueDepth`（增加排队容量）
 4. **降低单任务执行时间** — 检查子代理任务是否因提示词过长或模型响应慢而长期占用槽位。考虑缩短 `syncPromptTimeoutMs` 或使用更快的模型
-5. **检查背压配置** — 确保 `backpressureMaxRetries` 和 `retryAfterMs` 配合合理：当 QueueFullError 出现时，调度器会在 `retryAfterMs` 后自动重试，最多 `backpressureMaxRetries` 次（`src/dispatch/dispatch.ts` 背压逻辑）
+5. **检查背压配置** — 确保 `backpressureMaxRetries` 和 `retryAfterMs` 配合合理：当 QueueFullError 出现时，调度器会在 `retryAfterMs` 后自动重试，最多 `backpressureMaxRetries` 次（背压重试实现于 `src/dispatch/core/task-launcher.ts:100-112` 与 `task-launcher.ts:338-376`；`QueueFullError` 定义于 `src/dispatch/concurrency/concurrency.ts:49-59`）
 
 ### 示例调优
 
@@ -411,8 +415,10 @@ dispatch:
 |------|--------|--------|---------|
 | `maxConcurrent` | 3 | 16 | **并发槽位扩容**：从 3 增加到 16，允许更多子代理同时运行。这是提升整体吞吐量的核心杠杆 |
 | `syncReservedSlots` | 0 | 2 | **预留同步槽位**：从 0 增加到 2，在高并发场景下为同步调度保留专用通道，防止后台任务完全阻塞同步操作 |
-| `maxCostPerRequest` | 0.15 USD | 2.0 USD | **预算放宽**：从 0.15 提升至 2.0，约 13 倍。并发越高 token 消耗越大，预算必须相应提高。这是并发与成本之间的核心权衡 |
-| `budgetSampleIntervalMs` | 10,000 | 60,000 | **采样间隔拉长**：从 10 秒增加到 60 秒，降低预算检查频率以换取更高调度吞吐。注意：采样越松，超限发现越晚 |
+| `maxCostPerRequest` | 0.15 USD | 2.0 USD | **预算放宽**（编程式）：从 0.15 提升至 2.0，约 13 倍。并发越高 token 消耗越大，预算必须相应提高。这是并发与成本之间的核心权衡 |
+| `budgetSampleIntervalMs` | 10,000 | 60,000 | **采样间隔拉长**（编程式）：从 10 秒增加到 60 秒，降低预算检查频率以换取更高调度吞吐。注意：采样越松，超限发现越晚 |
+
+> `maxCostPerRequest` 与 `budgetSampleIntervalMs` 属于预算层，需通过编程式 `configOverrides` 注入（见上方「预算配置（编程式）」），**并非** `dispatch:` 块字段。
 
 ::: warning 迁移注意事项
 上述 4 个字段之间存在联动关系：增大 `maxConcurrent` 而不相应提高 `maxCostPerRequest`，会导致高频触发预算超限而取消任务。反之，仅放宽预算而不扩容并发则无法提升吞吐。建议按 **并发 → 预算 → 采样** 的顺序依次调整，每次调整后观察实际调度表现。

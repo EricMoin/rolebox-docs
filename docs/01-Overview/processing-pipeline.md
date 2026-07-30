@@ -7,6 +7,8 @@ description: rolebox 端到端消息处理流水线——从插件加载到函�
 
 > **相关文档：** [架构概览](/01-Overview/architecture-overview) — 模块职责与入口点总览 | [服务架构](/01-Overview/service-architecture) — 服务依赖关系与拓扑排序 | [Hook 参考](/03-Reference/hooks) — 内置 Hook 完整类型与配置
 
+rolebox 的一切工作都发生在一条消息处理流水线上：用户发来一条消息，它依次经过插件加载、函数解析、系统提示构建、工具执行与失败恢复等阶段，最后把响应返回给用户。本文按阶段拆解这条流水线，帮助你定位每个环节在做什么、由哪个模块负责。
+
 ## 数据流总览
 
 一条用户消息从输入到响应的完整流转：
@@ -32,9 +34,9 @@ flowchart LR
     subgraph Execution[执行与调度]
         L --> M{tool.execute\nbefore/after}
         M --> N[tool.before<br/>参数验证]
-        N --> O["tool 执行<br/>(dispatch/task 等)"]
+        N --> O["tool 执行<br/>(graph_* / task_* 等)"]
         O --> P[tool.after<br/>结果捕获]
-        P --> Q[dispatch 引擎<br/>dispatch/core/]
+        P --> Q[graph 引擎 / task 调度<br/>graph/ + dispatch/]
     end
 
     subgraph Recovery[恢复层]
@@ -63,7 +65,7 @@ sequenceDiagram
     participant TB as tool.before<br/>参数验证
     participant TK as 工具执行<br/>dispatch/task
     participant TA as tool.after<br/>结果捕获
-    participant DM as DispatchManager<br/>src/dispatch/core/
+    participant DM as Graph 引擎 / DispatchManager<br/>src/graph/ + src/dispatch/
     participant SA as 子代理
     participant REC as RecoveryEngine<br/>src/recovery/
 
@@ -115,9 +117,9 @@ sequenceDiagram
 
 opencode 启动时调用 `src/index.ts` 导出的 `RoleboxPlugin` 函数：
 
-- **`src/index.ts:21-66`** — 插件入口，发现 rolebox 目录 → `bootstrapRoles()` → `createPluginHooks()` → 返回 handler 对象
-- **`src/index.ts:32-39`** — `bootstrapRoles` 调用：发现所有角色 → 解析技能/引用/函数/子代理/协作图
-- **`src/pi-extension.ts:72-371`** — Pi IDE 的独立入口点，完成了同样的角色引导 + Pi 平台适配器 + 事件桥接
+- **`src/index.ts`** — 插件入口，解析 rolebox 目录 → 运行时初始化 → `createPluginHooks()` → 返回 handler 对象
+- **`src/resolver/bootstrap.ts`** — `bootstrapRoles` 调用：发现所有角色 → 解析技能/引用/函数/子代理/协作图
+- **`src/pi-extension.ts`** — Pi IDE 的独立入口点，完成了同样的角色引导 + Pi 平台适配器 + 事件桥接
 
 关键数据类型：`Plugin`（`@opencode-ai/plugin` 接口）→ `PluginInput`（client, directory）→ 返回 hook handler 对象。
 
@@ -198,9 +200,16 @@ functionRuntime.init()               // → 创建运行时状态
 ### 阶段 7：恢复层 (Recovery)
 
 **`src/recovery/engine.ts:21-56`** — `RecoveryEngine`：
-- **错误检测**：`PatternRegistry`（`src/recovery/error-detection.ts`）匹配错误模式（session_error, edit_error, json_error 等）
-- **策略链**：`RecoveryChainExecutor`（`src/recovery/chain-executor.ts`）顺序执行策略重试→回退模型→截断→压缩→提醒→汇总
-- **状态持久化**：`RecoveryStateStore`（`src/recovery/state.ts`）记录恢复尝试
+- **错误检测**：`PatternRegistry` 匹配错误模式（session_error, edit_error, json_error 等）
+- **策略链**：`RecoveryChainExecutor` 顺序执行策略重试→回退模型→截断→压缩→提醒→汇总
+- **状态持久化**：`RecoveryStateStore` 记录恢复尝试
+
+::: tip 源码定位
+- `src/recovery/engine.ts:21-56` — RecoveryEngine 核心 recover()
+- `src/recovery/error-detection.ts` — PatternRegistry 错误模式匹配
+- `src/recovery/chain-executor.ts` — RecoveryChainExecutor 策略链执行
+- `src/recovery/state.ts` — RecoveryStateStore 状态持久化
+:::
 
 7 种内置策略（`src/recovery/strategies/`）：
 | 策略 | 行为 |
@@ -227,7 +236,7 @@ rolebox 通过 opencode 的 **7 个 hook 回调** 拦截管道各阶段。以下
 | `experimental.chat.system.transform` | 系统提示构建 (阶段 3) | `src/hooks/system-transform.ts` | 每次模型调用前注入记忆、函数状态、校正 |
 | `tool.execute.before` | 工具执行 (阶段 4 — 前) | `src/hooks/tool-before.ts` | 工具执行前参数验证与守卫检查 |
 | `tool.execute.after` | 工具执行 (阶段 4 — 后) | `src/hooks/tool-after.ts` | 工具执行后结果捕获、图推进、观测器运行 |
-| `session.compacting` | 会话压缩 | `src/hooks/compaction.ts` | 会话压缩前保存检查点 |
+| `session.compacting` | 会话压缩 | `src/hooks/compaction.ts` | 会话压缩前保存检查点（checkpoint，进度快照） |
 
 ### 自定义 Hook (Custom Hooks)
 
@@ -288,15 +297,17 @@ tool.execute.after（结果捕获 + 图推进 + 观测器 + 处理器）
 
 这个回环的核心机制在 `src/hooks/system-transform.ts:57-62` 中的校正注入步骤：`pendingCorrections` 数组中的每条校正消息都会被注入到下一次系统提示中，并由模型在下一次调用时处理。
 
-循环终止条件由 `max_iterations`（`src/graph/state.ts:127`）、收敛检测（`src/graph/termination.ts`）和校正计数器共同控制。
+循环终止条件由 `max_iterations`（循环最大轮数上限，防止死循环；`src/graph/collaboration-state.ts:127`）、收敛检测（`src/graph/termination.ts`）和校正计数器共同控制。
 
-> **行引用**: `src/hooks/chat-message.ts:16-257` — 消息处理入口  
-> `src/hooks/system-transform.ts:17-323` — 系统提示构建  
-> `src/hooks/tool-before.ts:30-164` — 工具执行前参数验证  
-> `src/hooks/tool-after.ts:36-201` — 工具执行后结果捕获与图推进  
-> `src/function/parser.ts:20-59` — 函数激活语法解析  
-> `src/function/phase-machine.ts:9-30` — 函数门控与转换评估  
-> `src/recovery/engine.ts:65-161` — 恢复引擎核心 recover() 方法
+::: tip 源码定位
+- `src/hooks/chat-message.ts:16-257` — 消息处理入口
+- `src/hooks/system-transform.ts:17-323` — 系统提示构建
+- `src/hooks/tool-before.ts:30-164` — 工具执行前参数验证
+- `src/hooks/tool-after.ts:36-201` — 工具执行后结果捕获与图推进
+- `src/function/parser.ts:20-59` — 函数激活语法解析
+- `src/function/phase-machine.ts:9-30` — 函数门控与转换评估
+- `src/recovery/engine.ts:65-161` — 恢复引擎核心 recover() 方法
+:::
 
 ## 下一步
 

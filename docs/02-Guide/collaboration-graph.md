@@ -11,9 +11,13 @@ description: 协作图（Collaboration Graph）配置 — 内置拓扑（pipelin
 
 可以把它想象成代理的流程图。
 
+::: tip 图执行引擎
+rolebox `1.0.0` 将多代理协作统一到**图执行引擎（graph engine）**上（CHANGELOG.md:12 引入）。本文介绍的 `collaboration:` 配置是**声明式**路径——它会被自动转换为 v2 图声明（`convertCollaborationToGraphDeclaration`，`src/graph/collaboration-bridge.ts`），并注入 `<collaboration_graph>` / `<collaboration_state>` 提示块驱动自动推进。引擎层面的图节点是角色无关的 `{agent, prompt}` 元组，通过命令式 `graph_*` 工具（`graph_create` / `graph_add_node` / `graph_add_edge` / `graph_add_loop` / `graph_run` / `graph_status` / `graph_cancel` / `graph_approve`）构建与执行。完整 API 见[图执行引擎](/04-Advanced/graph-engine)。
+:::
+
 ## 快速开始
 
-在 role.yaml 中添加 `collaboration:` 块。最简单的方式是选择一个内置拓扑：
+在 role.yaml 中添加 `collaboration:` 块。最简单的方式是选择一个内置拓扑（即协作图的预设结构模式，如串行、循环、并行）：
 
 ```yaml
 name: Review Team Lead
@@ -44,7 +48,7 @@ collaboration:
 |---|---|---|
 | `pipeline` | parent → A → B → C → parent | 顺序传递。每个代理在前一个的输出基础上构建。 |
 | `review-loop` | parent → A → B → A（循环）→ parent | 修订循环。最后一个代理可以将工作发回再处理一轮。 |
-| `star` | parent → A, parent → B, parent → C（并行） | 扇出。每个代理独立工作并独立回报。 |
+| `star` | parent → A, parent → B, parent → C（并行） | 扇出（一个节点分发给多个下游）。每个代理独立工作并独立回报。 |
 
 ```yaml
 # pipeline：A → B → C，结束。
@@ -112,7 +116,7 @@ flowchart LR
 | **需要审批/修改循环？** | 不需要 | 是，核心场景 | 不需要 | 可能需要 |
 | **并行化需求** | 低（串行执行） | 低（串行 + 循环） | 高（完全并行） | 视配置而定 |
 | **终止条件复杂度** | 简单（到末尾结束） | 中等（循环停止条件） | 简单（全部回报即结束） | 复杂（需手动配置） |
-| **配置复杂度** | 极低（一行拓扑名） | 低（拓扑名 + max_iterations） | 极低（一行拓扑名） | 高（需手动定义所有边） |
+| **配置复杂度** | 极低（一行拓扑名） | 低（拓扑名 + max_iterations，即循环最大轮数上限） | 极低（一行拓扑名） | 高（需手动定义所有边） |
 | **典型场景** | ETL 管道、文档流水线 | 代码审查、设计审批 | 并行研究、多源数据采集 | 条件分支、非对称路由 |
 
 ### 选择流程
@@ -150,7 +154,7 @@ flowchart LR
 
 ### 示例 1：代码审查流水线（planner → implementer → reviewer）
 
-这是 Emperor 编排器模式的简化版本（完整实现在 `rolebox/README.md:229-255`）。Emperor 使用 3 阶段规划器（规划 → 审阅 → 定稿）配合多部门并行执行：
+这是 Emperor 编排器模式的简化版本（完整实现在 `rolebox/README.md:229-255`）。编排器（Emperor）是顶层 AI 编排角色：把任务拆成计划、分派给专业子代理、再验证结果，它自己不写代码。Emperor 使用 3 阶段规划器（规划 → 审阅 → 定稿）配合多部门并行执行：
 
 ```yaml
 name: Emperor
@@ -181,7 +185,7 @@ collaboration:
           contains: "PASS"
 ```
 
-工作流：Emperor → chancellor 制定策略 → jinyiwei 执行并派发 → validator 验证结果。验证未通过时循环回 chancellor 进行修订。最多 2 轮修订后自动结束。当 validator 输出包含 "PASS" 时提前终止。
+工作流：Emperor → **chancellor（编排器内部的策略规划角色）** 制定策略 → **jinyiwei（编排器内部的领域路由与执行角色）** 执行并派发 → validator 验证结果。验证未通过时循环回 chancellor 进行修订。最多 2 轮修订后自动结束。当 validator 输出包含 "PASS" 时提前终止。
 
 ### 示例 2：先研究后实现（researcher → implementer，star 拓扑）
 
@@ -314,7 +318,7 @@ collaboration:
 4. 每次通过 `dispatch` 派发到子代理时，状态推进到下一步
 5. 当到达退出边或超过最大迭代次数时，工作流完成
 
-编排器 LLM 在每个轮次都能看到状态，因此它知道下一个该调用哪个代理，而无需在提示词中硬编码派发逻辑。
+编排器 LLM（大语言模型，Large Language Model）在每个轮次都能看到状态，因此它知道下一个该调用哪个代理，而无需在提示词中硬编码派发逻辑。
 
 ## 没有图？没问题
 
@@ -323,6 +327,13 @@ collaboration:
 ## 循环终止
 
 默认情况下，循环在达到 `max_iterations` 时停止。`termination:` 块提供更精细的控制：当审查者批准、输出不再变化、超时触发或任意组合时停止。
+
+::: tip 终止字段速览
+- **max_iterations**：循环最大轮数上限，防止死循环。
+- **result_matches**：一个终止条件，当指定代理的输出匹配某种模式（如包含 "APPROVED"）时停止循环。
+- **converged**：一个终止条件，由 LLM 法官评估自然语言描述的状态是否达成（即是否收敛）。
+- **stuck**：一个终止条件，当同一代理连续 N 次产生相同输出（陷入死锁）时停止循环。
+:::
 
 ```yaml
 collaboration:
@@ -406,7 +417,7 @@ termination:
 
 ### 优先级与注意事项
 
-**每循环 vs 全局 `max_iterations`：** `collaboration:` 块上的根级 `max_iterations` 是全局安全上限。`termination.any_of` 或 `termination.all_of` 中的 `max_iterations` 是每循环组的上限。每循环上限触发其自己的终止原因；全局上限是最终兜底，无论终止配置如何都会生效。
+**每循环 vs 全局 `max_iterations`：** `collaboration:` 块上的根级 `max_iterations` 是全局安全上限。`termination.any_of` 或 `termination.all_of` 中的 `max_iterations` 是每循环组（loop group，图中被标记为可重复执行的一组节点，带最大轮数上限）的上限。每循环上限触发其自己的终止原因；全局上限是最终兜底，无论终止配置如何都会生效。
 
 ::: warning `timeout_ms` 精确度说明
 超时**仅在轮次之间检查**，而非轮次中途。如果一个长时间代理轮次在截止时间之前就已经开始，它将继续运行直到完成。因此，超时最多可能超出整整一个轮次的持续时间。对于时间敏感的工作流，建议同时设置 `max_iterations` 作为安全兜底。
@@ -480,7 +491,7 @@ collaboration:
     - "parent -> code-reviewer"
 ```
 
-验证逻辑实现于 `src/graph/validator.ts:51-76` — 所有边的 from/to 必须在可用代理集合或 `"parent"` 之中。
+验证逻辑实现于 `src/graph/collaboration-validator.ts:62-87` — 所有边的 from/to 必须在可用代理集合或 `"parent"` 之中。
 
 ### 2. 缺少退出边导致死循环
 
@@ -503,7 +514,7 @@ flow:
   - "writer -> parent"
 ```
 
-验证逻辑参见 `src/graph/validator.ts:81-91`。
+验证逻辑参见 `src/graph/collaboration-validator.ts:92-102`。
 
 ### 3. 终止条件引用了不存在的代理
 
@@ -529,7 +540,7 @@ termination:
         agent: reviewer
 ```
 
-验证逻辑参见 `src/graph/validator.ts:186-218`。
+验证逻辑参见 `src/graph/collaboration-validator.ts:197-229`。
 
 ### 4. 孤儿代理：定义了但未在图边中引用
 
@@ -569,7 +580,7 @@ dispatch 系统提供了 `dispatch_checkpoint` 和 `task_retry` 机制来支持�
 
 ### dispatch budget 与 max_iterations 的相互作用
 
-协作图的 `max_iterations` 控制工作流循环次数，而 dispatch budget 控制总 token 消耗。两者共同作用：
+协作图的 `max_iterations` 控制工作流循环次数，而 dispatch budget（一次任务允许消耗的总 token/费用上限，耗尽后禁止新的派发）控制总 token 消耗。两者共同作用：
 
 - **`max_iterations` 是循环计数器** — 每轮循环包含一次或多次 dispatch 调用。pipeline 拓扑中一次循环包含 N 个代理，每个代理消耗一次 dispatch budget。
 - **dispatch budget 是全局上限** — 当 budget 耗尽时，新的 dispatch 调用会被阻止，包括当前循环中的后续步骤。

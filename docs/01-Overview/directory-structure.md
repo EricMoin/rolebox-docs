@@ -7,7 +7,7 @@ description: rolebox 项目的目录结构说明 — 角色目录、技能、函
 
 > **相关文档：** [快速开始](/01-Overview/quick-start) — 5 分钟上手 rolebox | [创建角色](/02-Guide/create-a-role) — 完整的角色创建指南 | [角色定义参考](/03-Reference/role-yaml) — `role.yaml` 完整字段说明
 
-rolebox 的所有角色、技能、函数和引用文件都组织在 `~/.config/opencode/` 目录下。以下为完整的目录树，每个部分都有详细说明。
+rolebox 用一组约定好的目录来组织 AI 角色及其资源——角色、技能、函数、引用和子代理各归其位，运行时按约定路径自动加载。下面是一份完整的目录树，每个部分都有详细说明。
 
 ```
 ~/.config/opencode/
@@ -77,7 +77,7 @@ rolebox 的所有角色、技能、函数和引用文件都组织在 `~/.config/
 2. **全局用户函数**：位于 `~/.config/opencode/functions/` — 对所有角色可见
 3. **内置函数**：rolebox 自带的基础函数（`plan`、`execute`、`loop`）
 
-函数通过 `|functionName|` 语法在对话中触发，支持参数化调用（如 `|review:security,strict|`）。内置函数为默认加载项，仅在 `role.yaml` 显式声明 `functions` 字段时被覆盖。详见 [函数系统](/02-Guide/functions)。
+函数通过 `|functionName|` 语法在对话中触发，支持参数化调用（如 `|review:security,strict|`）。内置函数为默认加载项；`role.yaml` 的 `functions` 字段会**合并**到默认函数之上（不替换），移除默认函数需用 `disable_functions`。详见 [函数系统](/02-Guide/functions)。
 
 ### `references/` — 引用文档目录
 
@@ -109,14 +109,14 @@ rolebox 的所有角色、技能、函数和引用文件都组织在 `~/.config/
 rolebox 在运行时会按以下优先级解析技能、函数和引用文档。低优先级仅在高优先级未找到时生效：
 
 ```
-技能解析优先级 (src/resolver/skill-resolver.ts:22-34)
+技能解析优先级 (src/resolver/skill-resolver.ts)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 高  1. {roleDir}/skills/{name}/SKILL.md    ← 角色私有目录技能（复杂）
    2. {roleDir}/skills/{name}.md            ← 角色私有单文件技能
    3. ~/.config/opencode/skills/{name}/SKILL.md  ← 全局目录技能
 低  4. ~/.config/opencode/skills/{name}.md       ← 全局单文件技能
 
-函数解析优先级 (src/function/file-resolver.ts:19-23)
+函数解析优先级 (src/function/file-resolver.ts)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 高  1. {roleDir}/functions/{name}.md        ← 角色私有（可覆盖内置）
    2. ~/.config/opencode/functions/{name}.md ← 全局用户函数
@@ -141,11 +141,18 @@ rolebox 在项目根目录下维护一个隐藏的 `.rolebox/` 目录，用于�
 `.rolebox/` 目录已包含在 `.gitignore` 中，不会提交到版本控制。如果需要重置 rolebox 的运行时状态，可以安全地删除整个 `.rolebox/state/` 目录——rolebox 会在下次运行时自动重建。但 `.rolebox/memory.db` 包含跨会话的记忆数据，删除前请确认是否需要备份。
 :::
 
-项目级配置 `.rolebox/config.json` 使用简单 JSON 格式（`{ "defaultRole": "role-name" }`），由 `src/project-config.ts:42-70` 读取。该配置在角色解析之后、会话启动之前应用，因此不会影响 `rolebox list` 的输出，但会影响打开新会话时的默认角色选择。
+项目级配置 `.rolebox/config.json` 使用简单 JSON 格式（`{ "defaultRole": "role-name" }`），由 `src/project-config.ts` 读取。该配置在角色解析之后、会话启动之前应用，因此不会影响 `rolebox list` 的输出，但会影响打开新会话时的默认角色选择。
 
 ### Runtime State (运行时状态)
 
 运行时状态是 rolebox 执行引擎的核心数据层，对应的模块实现参见 [架构概览 - 模块地图](/01-Overview/architecture-overview#_30-模块地图)。每个状态文件由对应的服务模块在运行时自动维护：
+
+::: tip 名词速览
+- **Graph 执行引擎** — rolebox 统一的多代理编排引擎：把"谁把工作传给谁"建模成一张有向图来执行
+- **检查点 / checkpoint** — 子代理执行期间保存的进度快照，重试时可注入，避免重复已完成的工作
+- **台账 / ledger** — 按会话或函数记录的信号写入记录（下文 `signalledger-*.json`）
+- **dispatch budget（预算）** — 一次任务允许消耗的总 token/费用上限；耗尽后禁止新的派发
+:::
 
 ```
 .project-root/
@@ -156,7 +163,11 @@ rolebox 在项目根目录下维护一个隐藏的 `.rolebox/` 目录，用于�
     └── state/                       # 运行时状态目录
         ├── dispatch-{hash}.json     # 调度任务状态（含出站通知、结果引用）
         ├── fnstate-{hash}.json      # 函数运行时状态（阶段、门控、证据）
-        ├── graph-{hash}.json        # 协作图执行状态（前沿、迭代计数）
+        ├── collaboration-{hash}.json  # 协作图执行状态（前沿、迭代计数）
+        ├── engine-{slug}.json       # Graph 执行引擎 v2 状态（节点生命周期、预算）
+        ├── graph-events-{hash}.ndjson  # 引擎写侧事件日志（追加式）
+        ├── loops-{hash}.json        # 循环协调器状态（loop-store v3）
+        ├── signalledger-{hash}.json # 会话级信号账本
         ├── metrics-{hash}.json      # 指标持久化（原子写入）
         ├── metrics-events-{hash}.ndjson  # 指标事件环形缓冲区（上限 100KB）
         ├── progress/{taskId}.json   # 进度报告数据
@@ -172,12 +183,16 @@ rolebox 在项目根目录下维护一个隐藏的 `.rolebox/` 目录，用于�
 | `config.json` | `src/project-config.ts` | 项目级配置，设置 `defaultRole` 指定默认角色。在 `~/.config/opencode/` 全局配置之后加载，仅对该项目生效 |
 | `dispatch-{hash}.json` | `src/dispatch/persistence/task-store.ts` | 所有调度任务的持久化状态，含任务图、结果引用、出站通知队列 |
 | `fnstate-{hash}.json` | `src/function/runtime-store.ts` | 函数状态机的阶段/门控/证据观测记录 |
-| `graph-{hash}.json` | `src/graph/graph-store.ts` | 协作图的前沿节点、迭代次数、终止状态 |
+| `collaboration-{hash}.json` | `src/graph/collaboration-store.ts` | 协作图（`collaboration:` 配置）的前沿节点、迭代次数、终止状态 |
+| `engine-{slug}.json` | `src/graph/engine/engine-persistence.ts` | v2 图执行引擎的每个图状态（阶段、节点生命周期、预算、前沿、循环组（loop group，可重复执行的一组节点，带最大轮数上限）、检查点） |
+| `graph-events-{hash}.ndjson` | `src/graph/engine/graph-events.ts` | 引擎写侧事件的追加式 NDJSON 事件日志（节点派发、终止转换、阶段变化、预算更新） |
+| `loops-{hash}.json` | `src/loop/loop-store.ts` | 循环协调器状态（loop-store v3，接受 schema v1–3） |
+| `signalledger-{hash}.json` | `src/signal/session-signal-ledger.ts` | 会话级信号账本，信号记录在裸子代理会话中依然存活 |
 | `metrics-{hash}.json` | `src/dispatch/persistence/metrics-persister.ts` | 指标快照（计数器、仪表盘、直方图、恢复数据），由 `ROLEBOX_METRICS` 环境变量控制 |
 | `metrics-events-{hash}.ndjson` | `src/dispatch/persistence/metrics-persister.ts` | 指标事件环形缓冲区，上限 100KB，超限后自动截断保留后半 |
 | `progress/{taskId}.json` | `src/dispatch/progress/progress-store.ts` | 运行中任务的进度报告（阶段、百分比、消息），5 秒去抖写入 |
 | `checkpoints/{taskId}.json` | `src/dispatch/checkpoint/checkpoint-store.ts` | 检查点数据数组，用于失败后带上下文恢复。每任务最多保留 100 条（FIFO 淘汰） |
-| `results/{taskId}.txt` | `src/dispatch/persistence/task-store.ts` | 任务结果侧车文件，存储超出内联限制（4KB）的 `dispatch_output` 文本 |
+| `results/{taskId}.txt` | `src/dispatch/completion/result-extractor.ts` | 任务结果侧车文件，存储超出内联限制的 `dispatch_output` 文本 |
 | `dispatch-{hash}.json.lock` | `src/dispatch/concurrency/state-lock.ts` | 文件锁，防止多进程并发写入冲突。5 分钟无活动自动失效回收。锁竞争时退化为只读模式 |
 
 `{hash}` 是项目目录规范化后的 SHA-256 前 12 位，确保同一物理路径总是映射到相同的状态文件名。
@@ -190,13 +205,17 @@ rolebox 在项目根目录下维护一个隐藏的 `.rolebox/` 目录，用于�
 |------|-----------------|
 | `dispatch-{hash}.json` | `{ "tasks": [{ "id": "bg_xxx", "agent": "backend", "status": "running" }] }` |
 | `fnstate-{hash}.json` | `{ "sessions": { "sid": { "phase": "active", "gateSatisfied": true } } }` |
-| `graph-{hash}.json` | `{ "version": 2, "sessions": [{ "sessionId": "...", "state": { "frontier": ["agent-a"], "iterationCount": 3 } }] }` |
+| `collaboration-{hash}.json` | `{ "version": 2, "sessions": [{ "sessionId": "...", "state": { "frontier": ["agent-a"], "iterationCount": 3 } }] }` |
+| `engine-{slug}.json` | `{ "phase": "executing", "nodes": { "a": { "status": "running" } }, "budget": {...} }` |
+| `graph-events-{hash}.ndjson` | 每行一条写侧事件：`{ "event": "node_dispatch", "graphId": "...", ... }` |
+| `loops-{hash}.json` | `{ "loops": [{ "id": "loop_1", "state": "active", "round": 3 }] }` |
+| `signalledger-{hash}.json` | `{ "sessions": { "sid": { "signals": [...] } } }` |
 | `metrics-{hash}.json` | `{ "dispatchCount": 42, "avgDurationMs": 1250, "lastUpdated": "..." }` |
 | `progress/{taskId}.json` | `{ "stage": "implementing", "percentage": 60, "message": "处理中..." }` |
 | `checkpoints/{taskId}.json` | `{ "phase": "research", "completedItems": [...], "remainingItems": [...] }` |
 | `results/{taskId}.txt` | 纯文本形式存储，内容为工具调用的完整输出 |
 
-`{hash}` 经 `src/utils/state-paths.ts:15-17` 中的 `shortHash()` 函数计算（SHA-256 前 12 位十六进制），确保同一物理路径总是映射到固定的文件名。
+`{hash}` 经 `src/utils/state-paths.ts` 中的 `shortHash()` 函数计算（SHA-256 前 12 位十六进制），确保同一物理路径总是映射到固定的文件名。
 
 #### 原子写入与临时文件
 
@@ -232,7 +251,7 @@ rolebox 在启动时自动执行 `cleanExpiredState()`（`src/dispatch/persisten
 |------|------|-----------|
 | `config.yaml` | 注册表配置。默认包含 `oh-my-role` 注册表，记录 GitHub 仓库 URL 和默认注册表标记 | 删除后下次使用自动重建默认配置 |
 | `rolebox.lock` | 锁文件，记录已安装角色的版本号、注册表源和完整性哈希（`sha256-...`） | 删除后角色仍存在，但 `rolebox sync` 将无法找到它们 |
-| `logs/rolebox.log` | rolebox CLI 操作日志 | 可安全删除，自动轮转 |
+| `logs/rolebox.log` | rolebox CLI（命令行界面，Command-Line Interface）操作日志 | 可安全删除，自动轮转 |
 
 `~/.config/rolebox/config.yaml` 与项目本地的 `.rolebox/config.json` 分工明确：config.yaml 管理**角色安装和注册表**（影响 `rolebox install`、`rolebox sync`），而 `.rolebox/config.json` 管理**项目级运行时配置**（如默认角色）。
 
@@ -243,7 +262,45 @@ rolebox 在启动时自动执行 `cleanExpiredState()`（`src/dispatch/persisten
 | `roles/{registry}/{roleId}@{version}/` | 已安装角色包的完整目录。`rolebox install` 将角色下载到此处，`rolebox sync` 从此创建符号链接到 `~/.config/opencode/rolebox/` |
 | `cache/{registry}/` | 注册表清单缓存（`registry.yaml` + `.timestamp`）。默认缓存 30 分钟，可通过 `--no-cache` 跳过 |
 
-角色存储路径格式为 `{dataDir}/roles/{registry}/{roleId}@{version}/`（见 `src/cli/paths.ts:54-56`），确保同一角色不同版本可以共存。升级角色时旧版本目录被自动删除。
+角色存储路径格式为 `{dataDir}/roles/{registry}/{roleId}@{version}/`（见 `src/cli/paths.ts`），确保同一角色不同版本可以共存。升级角色时旧版本目录被自动删除。
+
+## rolebox 源码目录结构 (`src/`)
+
+rolebox 的源码按功能划分为 24 个一级目录，外加 `logger.ts`、`project-config.ts` 等顶层模块文件。以下为 `src/` 的实际树（与当前版本 `package.json` 的 `1.0.0` 源码一致）：
+
+```
+src/
+├── asset/           # 资产热重载、搜索、检查、验证、技能组合
+├── cli/             # CLI 主入口、命令、路径、注册表客户端、下载进度
+├── core/            # PluginCore、服务注册、事件总线、ServiceSupervisor
+├── dispatch/        # DispatchManager、并发、预算、检查点、持久化、查询
+├── extensions/      # 扩展点加载器、注册表、能力桥接
+├── function/        # 函数解析器、运行时状态、阶段机、门控、观测
+├── graph/           # Graph 执行引擎 v2 (engine/) + graph_* 工具 (tools/) + 协作图 (collaboration-*)
+├── hashline/        # 内容哈希锚定编辑引擎（读/写/原子写入/校验）
+├── hooks/           # chat.message、system.transform、tool.before/after、compaction
+├── loader/          # 角色发现 (role-loader)、子代理加载
+├── logger.ts        # 日志系统
+├── loop/            # 循环协调器、工作器调度、取消、持久化
+├── lsp/             # LSP 客户端管理器、服务器、工具
+├── memory/          # 记忆存储（SQLite + FTS5）、工具、搜索
+├── notifications/   # 多通道通知、调度器、节流、静默时段
+├── platform/        # 适配器、端口定义、工具装配、能力声明、路径解析
+├── project-config.ts # 项目级配置（.rolebox/config.json）加载与应用
+├── prompt/          # 代理提示构建、agent 配置、reminder
+├── recovery/        # 恢复引擎、链执行器、错误检测、7 种内置策略
+├── resolver/        # 引导、环境变量、frontmatter、模型解析、编排器、引用/技能解析
+├── session/         # 会话工具、分析、导出、搜索
+├── signal/          # 信号常量、信号工具、会话级信号账本
+├── sync/            # 代理文件同步、技能符号链接
+├── tui/             # 终端 UI 组件、状态、逻辑、事件
+├── utils/           # 路径、状态路径、超时、fs、会话作用域、引用搜索
+└── web/             # Web 抓取、搜索、浏览器检测、SSRF 防护、可读性提取
+```
+
+顶层入口文件还包括：`index.ts`（opencode 插件入口）、`pi-extension.ts`（Pi 平台扩展入口）、`constants.ts`（全局常量）、`types.ts` / `types.*.ts`（类型定义）。
+
+其中 `graph/` 目录承载两条职责：一是 **v2 图执行引擎**（`graph/engine/*`，节点生命周期、join 评估（判断某节点的所有上游输入是否齐备）、信号传播、级联取消（取消时连带取消其下游依赖节点）、循环组、审批门（执行到需要人工确认的节点时暂停）、预算、持久化与恢复）与命令式 `graph_*` 工具集（`graph/tools/*`）；二是 **协作图**（`graph/collaboration-*`），将 `role.yaml` 中的 `collaboration:` 声明转换为解析后的执行图。
 
 ## 状态迁移记录
 
@@ -254,7 +311,7 @@ rolebox 在启动时自动执行 `cleanExpiredState()`（`src/dispatch/persisten
 - **旧位置**（v0.12.0 前）：`~/.local/share/rolebox/state/dispatch-*.json`
 - **新位置**（v0.12.0 起）：`.rolebox/state/dispatch-*.json`
 
-迁移由 rolebox 自动处理——启动时检测旧位置并搬移到新位置。如果发现 `.rolebox/state/` 为空而旧位置有残留，删除旧位置文件是安全的。
+迁移由 rolebox 自动处理——启动时检测旧位置并搬移到新位置。如果发现 `.rolebox/state/` 为空而旧位置有残留，删除旧位置文件是安全的。当前 graph 状态路径为 `.rolebox/state/collaboration-{hash}.json`（协作图）与 `.rolebox/state/engine-{slug}.json`（v2 引擎状态），详见上文状态文件清单。
 
 ## 遇到问题时该看哪个目录
 
@@ -263,7 +320,7 @@ rolebox 在启动时自动执行 `cleanExpiredState()`（`src/dispatch/persisten
 | 角色没有按预期响应，技能/函数未加载 | `~/.config/opencode/rolebox/{roleName}/` | 检查 `role.yaml` 中的 `skills` 和 `functions` 声明 |
 | 任务卡住或状态异常 | `.rolebox/state/dispatch-{hash}.json` | `rolebox monitor --task-id=<id>` |
 | 函数状态机行为异常 | `.rolebox/state/fnstate-{hash}.json` | `rolebox monitor`（过滤 Functions 面板） |
-| 协作图执行停滞 | `.rolebox/state/graph-{hash}.json` | `rolebox monitor`（过滤 Graph 面板） |
+| 协作图执行停滞 | `.rolebox/state/collaboration-{hash}.json` | `rolebox monitor`（过滤 Graph 面板） |
 | 进度报告丢失或不更新 | `.rolebox/state/progress/{taskId}.json` | 直接读取 JSON，检查 `timestamp` 是否更新 |
 | 角色安装后未生效 | `~/.config/opencode/rolebox/{roleName}/` | 运行 `rolebox sync opencode`，确认符号链接存在 |
 | 角色版本不匹配 | `~/.config/rolebox/rolebox.lock` | `rolebox list` 查看已安装版本 |

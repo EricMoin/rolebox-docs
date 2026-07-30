@@ -68,7 +68,7 @@ docs: 更新 API 参考中的工具签名
 | 选项 | 值 | 说明 |
 |------|-----|------|
 | `target` | `ES2022` | 编译目标为 ES2022 |
-| `module` | `NodeNext` | ESM 模块解析（Node.js Next 模式） |
+| `module` | `NodeNext` | ESM（ES 模块 / ECMAScript Modules）解析（Node.js Next 模式） |
 | `strict` | `true` | 全部严格检查（`strictNullChecks`、`noImplicitAny` 等） |
 | `declaration` | `true` | 自动生成 `.d.ts` 声明文件 |
 | `declarationMap` | `true` | 声明文件源映射 |
@@ -81,7 +81,7 @@ docs: 更新 API 参考中的工具签名
 | 类别 | 规范 | 示例 |
 |------|------|------|
 | 变量 / 函数 | camelCase | `getHandler`、`resolveRole` |
-| 类型 / 接口 / 类 | PascalCase | `DispatchManager`、`PluginCore` |
+| 类型 / 接口 / 类 | PascalCase | `DispatchManager`、`PluginCore`（rolebox 插件的核心容器对象，负责服务注册、事件总线、工具注册） |
 | 文件名 / 目录名 | kebab-case | `chat-message.ts`、`event-bus.ts` |
 | 常量 (顶层) | UPPER_SNAKE_CASE | `DEFAULT_TIMEOUT`、`MAX_RETRIES` |
 | 枚举成员 | PascalCase | `TaskStatus.Running` |
@@ -95,7 +95,7 @@ docs: 更新 API 参考中的工具签名
 
 ### 类型注释
 
-为所有公共 API 添加显式类型注释。内部实现可以使用类型推断。
+为所有公共 API（应用程序接口，Application Programming Interface）添加显式类型注释。内部实现可以使用类型推断。
 
 ### 错误处理
 
@@ -116,8 +116,8 @@ docs: 更新 API 参考中的工具签名
 
 | 源码路径 | 测试文件 |
 |----------|----------|
-| `src/dispatch/manager.ts` | `tests/dispatch/manager.test.ts` |
-| `src/graph/state.ts` | `tests/graph/state.test.ts` |
+| `src/dispatch/core/manager.ts` | `tests/dispatch/manager.test.ts` |
+| `src/graph/collaboration-state.ts` | `tests/graph/state.test.ts` |
 | `src/memory/store.ts` | `tests/memory/store.test.ts` |
 | `src/cli/commands/list.ts` | `tests/cli/commands/list.test.ts` |
 
@@ -143,7 +143,7 @@ describe("dispatch manager", () => {
 | 命令 | 用途 |
 |------|------|
 | `bun test` | 运行所有测试 |
-| `bun test:tui` | 仅运行 TUI 测试 |
+| `bun test:tui` | 仅运行 TUI（终端用户界面）测试 |
 | `bun test -t "dispatch"` | 按测试名称匹配过滤 |
 
 测试目录按功能域分组：
@@ -244,9 +244,9 @@ rolebox 的源码按功能域组织在 `src/` 子目录中：
 
 | 目录 | 对应 `tests/` | 用途 |
 |------|---------------|------|
-| `src/dispatch/` | `tests/dispatch/` | 任务调度引擎：管理器、状态持久化、并发控制、预算跟踪、检查点、进度报告 |
+| `src/dispatch/` | `tests/dispatch/` | 任务调度引擎：管理器、状态持久化、并发控制、预算跟踪、检查点（进度快照）、进度报告 |
 | `src/graph/` | `tests/graph/` | 协作图执行引擎：图推进、解析器、终止条件、状态管理 |
-| `src/cli/` | `tests/cli/` | CLI 接口：citty 命令定义、配置管理、路径解析 |
+| `src/cli/` | `tests/cli/` | CLI（命令行界面，Command-Line Interface）接口：citty 命令定义、配置管理、路径解析 |
 | `src/core/` | `tests/core/` | 核心基础设施：服务注册、事件总线、状态管理、热重载 |
 | `src/hooks/` | `tests/hooks/` | 云台生命周期 Hook：chat-message、system-transform、tool-before/after |
 | `src/function/` | `tests/…` | 函数状态机：运行时状态、条件评估、观察者 |
@@ -254,11 +254,11 @@ rolebox 的源码按功能域组织在 `src/` 子目录中：
 | `src/loader/` | `tests/…` | 角色加载器：YAML 解析、递归角色加载 |
 | `src/memory/` | `tests/memory/` | 记忆系统：SQLite 存储、搜索、注入 |
 | `src/session/` | `tests/session/` | 会话管理：浏览、检查工具 |
-| `src/signal/` | `tests/signal/` | 信号系统：出带外信号周期 |
+| `src/signal/` | `tests/signal/` | 信号系统：出带外信号（out-of-band，独立传递的控制信令）周期 |
 | `src/hashline/` | `tests/hashline/` | 哈希锚点编辑引擎 |
-| `src/web/` | `tests/web/` | 网络工具：页面抓取、SSRF 防护 |
+| `src/web/` | `tests/web/` | 网络工具：页面抓取、SSRF（服务端请求伪造）防护 |
 | `src/tui/` | `tests/tui/` | TUI 仪表盘：Solid.js + OpenTU |
-| `src/extensions/` | `tests/extensions/` | 扩展注册表：条件、拓扑、通知通道 |
+| `src/extensions/` | `tests/extensions/` | 扩展注册表：条件、拓扑（协作图预设结构模式：pipeline / review-loop / star）、通知通道 |
 | `src/recovery/` | `tests/recovery/` | 错误恢复：策略链、启动检查 |
 
 新增功能应先定位所属域目录，再添加对应的测试文件。
