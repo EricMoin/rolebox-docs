@@ -1,254 +1,88 @@
 ---
 title: 错误处理
-description: 错误处理策略 — rolebox 的错误容忍机制、降级行为与安全边界
+description: rolebox 的降级行为、自动恢复策略与排错入口 — 出错时会发生什么、该配哪条恢复链、错误消息怎么读。
 ---
 
-# 错误处理
+# 错误处理（Error Handling）
 
-> **相关文档：** [恢复系统](/03-Reference/recovery-system) — 恢复系统详细架构 | [调度配置](/03-Reference/dispatch-config) — 并发与预算配置 | [已知限制](/03-Reference/limitations) — 当前版本限制
+rolebox 采用错误容忍（fault-tolerant）设计：某个角色、Hook、扩展或子代理出错时，出问题的那一部分被跳过或降级，其余功能继续运行。本页面向使用者，回答四个问题——出错时**会发生什么**、**该配哪条恢复链**、**错误消息是什么意思**、**从哪里开始排查**。恢复引擎的内部机制（错误模式匹配、策略链执行器、状态持久化、指标收集）见[恢复系统](/03-Reference/recovery-system)。
 
-rolebox 采用**错误容忍（fault-tolerant）**设计原则：单个组件的故障不会导致整个系统崩溃。遇到问题时，相关能力会**服务降级**（service degradation）——即该组件被标记为不可用并跳过，其余功能继续运行——而不是让整个系统停摆。以下是各场景下的降级行为汇总。
+> 前置：[创建角色](/02-Guide/create-a-role)｜相关：[恢复系统](/03-Reference/recovery-system)｜[调度配置](/03-Reference/dispatch-config)｜[已知限制](/03-Reference/limitations)
 
 ## 降级行为一览
 
-| 场景 | 行为 |
+每一条都对应一个真实会发生的故障场景：**行为**是系统实际做的事，**用户可见现象**是你据以确认发生了什么的东西。
+
+| 场景 | 行为 | 用户可见现象 |
+|---|---|---|
+| 角色目录里没有 `role.yaml` | 该目录不会被当作角色发现，没有任何日志 | harness 中该角色不可用 |
+| `role.yaml` 语法错误、缺 `name`、缺提示词 | 跳过该角色，不注册；其余角色照常加载 | harness 中该角色不可用；日志出现 `Skipping "<角色>": invalid YAML` 一类消息。（`rolebox list` 读的是安装锁文件，仍会把它列出来，不能用来判断加载是否成功） |
+| 角色目录名含 `--` | 跳过该角色（`--` 被保留作子代理 ID 分隔符） | 角色不可用；日志提示 `role ID must not contain "--"` |
+| 技能文件缺失 | 跳过该技能，角色与其余技能照常加载 | 日志 `Skill "<名字>" not found. Searched: …`；harness 中角色调不到该技能 |
+| 函数文件缺失 | 跳过该函数 | 日志 `Function "<名字>" not found. Searched: …`（依次查角色本地、全局、内置三处） |
+| 函数激活前缀无效（写成大写、或出现在句子中间而非行首） | 不解析为激活，消息原样送出 | 函数没有激活；那段文本仍留在用户消息里 |
+| 自定义 Hook 模块加载失败（文件缺失、语法错误、导入抛错） | 按模块捕获，记录警告，跳过该 Hook | 日志 `Failed to load custom hook module`；该 Hook 的副作用不发生 |
+| 自定义 Hook 的处理器抛异常 | 按事件捕获，记录警告，继续执行其它 Hook | 日志 `Custom hook "<名字>" failed on <事件>`；会话不中断 |
+| 扩展模块加载失败 | 按模块捕获，记录警告，跳过该扩展 | 日志 `Failed to load extension module`；其它扩展与内置功能不受影响 |
+| 子代理会话创建瞬时失败 | 退避重试，默认共 3 次尝试、每次间隔 250 ms | 任务延迟启动；重试耗尽后任务进入 `error`，错误文本记在任务上 |
+| 服务端拒绝创建会话 | 不重试 | 任务立即进入 `error`；错误文本是服务端给出的原因，无原因时是 `Failed to create session: empty response` |
+| 环境变量插值 `{env:NAME}` 中变量未设置 | 保留占位符原文，不做猜测性替换 | 配置里仍是 `{env:NAME}`；日志说明该变量未设置及如何设置 |
+| 预算超限 | 返回结构化原因，取消对应任务，不抛异常 | 任务被取消；原因是 `Request input token budget exhausted: …` 这类固定模板 |
+| 结果物化超时（默认 10 秒） | 记录 `fetchError: "timeout"`，结果 sidecar 留空 | 读到空结果，或图节点输出里出现 `[fetch error: timeout]` |
+| 工作区状态文件损坏 | 启动检查把它移入 `quarantine/` 目录，相关子系统从空状态启动 | 日志 warning；此前的任务、指标记录不再可见 |
+| 通知通道缺少平台命令 | 静默跳过该通道 | 收不到该类通知，其它通道照常；系统提示类通道会记录 `all system toast attempts failed` |
+| 图上的循环组达到遍历硬上限 | 以 `max_traversals exhausted` 升级（escalate），而不是继续空转 | `graph_status` 中该节点为 `escalate`，并携带结构化 payload |
+
+四条原则贯穿上表：**隔离故障**（每个角色、Hook、扩展都是独立故障域）、**优雅降级**（缺失的组件不阻塞启动）、**可见性**（多数降级写日志，个别如通知通道缺失是静默跳过）、**不做猜测**（无法解析的内容原样保留，不自动改写）。
+
+## 自动恢复：我该配哪条链
+
+**恢复策略**（recovery strategy）是出错时自动执行的补救动作；把策略按顺序排成一条**策略链**（strategy chain），引擎就逐个尝试，直到恢复成功或链走完。内置 7 种策略：
+
+| 策略 | 做什么 |
 |---|---|
-| YAML 格式无效或文件缺失 | 跳过该角色，opencode 不会崩溃 |
-| 技能文件缺失 | 输出警告，不阻塞角色加载 |
-| 函数文件缺失 | 静默跳过 |
-| 无效的函数激活语法（大写、句中管道符） | 保持消息原样，不做修改 |
-| Hook 模块加载失败（缺失、语法错误） | 记录警告，Hook 被跳过，继续运行 |
-| Hook 处理器异常 | try/catch 包裹，记录警告，继续运行 |
-| 扩展模块加载失败 | 按模块捕获，记录警告，跳过该扩展 |
-| 子代理调度失败 | 支持重试机制和背压控制 |
-| 无效的环境变量插值 | 保留原始 `{env:...}` 文本 |
+| `retry` | 退避后重试当前操作（默认 2 次，起始间隔 2000 ms，倍数 2） |
+| `compact` | 压缩会话上下文，保留 `todos` 与 `artifacts` |
+| `fallback_model` | 换用备选模型重新提示 |
+| `remind_and_retry` | 向会话注入一段提示文本，然后让模型重试 |
+| `truncate` | 要求模型把输出压缩到目标比例（默认 50%，最多 8 次） |
+| `summarize` | 把上下文总结成摘要后继续 |
+| `abort` | 终止恢复链，并向模型注入一条明确的中止消息 |
 
-## 快速参考：我应该配置哪个恢复策略
+五个错误类别默认就有链，下表按**你看到的症状**给出它们；症状来自各内置恢复 Hook 的匹配条件。
 
-**恢复策略**（recovery strategy）就是错误发生时系统自动执行的补救动作；把多个策略按顺序串起来就是**策略链**（strategy chain）。根据你遇到的错误类型，以下表格推荐默认策略链。所有策略名称均来自内置注册表（`src/recovery/config.ts:88-96`），可直接用于 `role.yaml` 的 `hooks.recovery` 配置块。
-
-| 症状 | 建议策略链 | 说明 |
-|------|-----------|------|
-| **API（应用程序接口，Application Programming Interface）500 / 网络超时 / 服务端错误** | `retry(2次, 指数退避)` → `compact` → `abort` | 使用 `session_error` 默认链。前两次重试指数退避，然后压缩会话上下文，最后中止 |
-| **Token 超限（context_length_exceeded）** | `truncate(最多8次, 50%压缩)` → `summarize` → `abort` | 使用 `context_window` 默认链。先截断输出，再尝试总结压缩，均失败则中止 |
-| **Edit 错误（oldString not found / multiple matches / same content）** | `remind_and_retry(2次)` | 使用 `edit_error` 默认链。注入提示让模型重新读取文件再重试 |
-| **JSON 解析错误（unexpected token / invalid json）** | `remind_and_retry(2次)` | 使用 `json_error` 默认链。注入修复提示后重试 |
-| **空响应（工具返回空或过短）** | `remind_and_retry(1次)` | 使用 `empty_response` 默认链。重试一次后推进到下一策略或中止 |
-| **模型能力不足需要回退** | `retry` → `fallback_model` → `abort` | 在 `session_error` 链中插入 `fallback_model`，使用备选模型重新提示。需要额外配置备选模型参数 |
-
-::: tip 策略链是可按角色定制
-每个角色可以在 `role.yaml` 中独立配置策略链。详细配置语法参见下方「按角色配置恢复策略」章节。
-:::
-
-## 设计原则
-
-- **隔离故障**：每个角色、Hook、扩展都是独立的故障域。一个角色的 YAML 错误不会影响其他角色。
-- **优雅降级**：缺失的技能或函数不会阻塞启动——系统以警告的方式继续运行，尽最大努力提供可用功能。
-- **用户可见性**：所有降级行为都会通过日志/警告的方式通知用户，便于诊断和修复。
-- **不做猜测**：遇到无法解析的内容时，保持原样传递，不尝试自动修正。
-
-## 恢复系统 (Recovery System)
-
-恢复系统是一个可插拔的错误恢复框架，用于捕获常见故障模式并自动执行补偿策略。它由 `RecoveryEngine` 统一管理（`src/recovery/engine.ts:21-56`），通过可配置的策略链（chain-of-strategies）将错误恢复与业务逻辑解耦。
-
-### 架构概览
-
-恢复系统由四个核心组件构成：
-
-| 组件 | 文件 | 职责 |
+| 症状 | 错误类别 | 内置默认链 |
 |---|---|---|
-| `RecoveryEngine` | `src/recovery/engine.ts` | 恢复系统的入口，管理配置、状态、指标和策略链的执行入口 |
-| `PatternRegistry` | `src/recovery/error-detection.ts` | 注册和匹配错误模式，从原始错误中提取结构化 `RecoveryError` |
-| `StrategyRegistry` | `src/recovery/strategies/registry.ts` | 注册和查找恢复策略，运行时按名称获取策略实例 |
-| `RecoveryChainExecutor` | `src/recovery/chain-executor.ts` | 执行策略链，按顺序尝试策略，直到恢复成功或链耗尽 |
+| API 返回 5xx、网络超时、服务端错误（`session.error` 事件） | `session_error` | `retry`(2 次) → `compact` → `abort` |
+| 报上下文超限：context length / context window / token limit / prompt too long | `context_window` | `truncate`(50%，最多 8 次) → `summarize` → `abort` |
+| `edit` / `write` / `hashline_edit` 报 oldString not found、multiple matches、anchor not found、version mismatch，或权限、目录类磁盘错误 | `edit_error` | `remind_and_retry`(2 次) |
+| 工具输出不是合法 JSON：Unexpected token、Invalid JSON、Unexpected end of JSON | `json_error` | `remind_and_retry`(2 次) |
+| 工具调用返回空白或几乎没有内容（去空白后不足 5 个字符） | `empty_response` | `remind_and_retry`(1 次) |
+| 当前模型持续失败，想换备选模型 | 在 `session_error` 链里插入 `fallback_model` | `retry` → `compact` → `fallback_model` → `abort` |
 
-### 错误检测
+补充三个可判定的边界：
 
-**错误检测**（error detection）就是"先判断这次错在哪儿"——把原始错误归类到某个错误类别（超时、token 超限、编辑失败等），这样才知道该走哪条策略链。
+- 类别键**整个省略**时才回落到内置默认链；一旦写了该类别但没写 `chain`（或 `chain` 为空），该类别就**没有链**，错误不会被自动恢复。
+- `enabled: false` 写在类别上时，即使给了 `chain` 也不执行。
+- 一条链的尝试次数达到 `max_total_attempts`（默认 10）后，该次链执行以 `global attempt limit reached` 结束；链自然走完则以 `chain exhausted` 结束。两种情况都会把最终消息注入会话。
 
-`PatternRegistry`（`src/recovery/error-detection.ts:6-57`）维护一组 `ErrorPattern`（`src/recovery/types.ts:192-203`），每个模式通过 `match(error)` 方法判断是否匹配。系统内置 7 个默认错误模式（`src/recovery/error-detection.ts:90-297`）：
+## 按角色配置恢复
 
-| 模式名称 | 所属类别 | 匹配条件 |
-|---|---|---|
-| `api-error` | `session_error` | 错误对象包含 `error.type`、`code` 或 `status` 字段 |
-| `timeout` | `session_error` | 消息包含 timeout / timed out / deadline exceeded / ETIMEDOUT 关键字 |
-| `tool-unavailable` | `session_error` | 消息匹配 tool not found / unknown tool / unavailable tool |
-| `token-limit` | `context_window` | 消息包含 context_length_exceeded / maximum context length / token limit 等 |
-| `edit-not-found` / `edit-multiple-matches` / `edit-same-content` | `edit_error` | Edit 工具返回 oldString not found / multiple matches / same content 错误 |
-| `json-parse-error` | `json_error` | 消息匹配 JSON 语法错误正则（unexpected token / invalid json 等） |
-| `empty-response` | `empty_response` | 工具输出或模型响应为空或过短（< 5 字符） |
-
-### 7 种内置恢复策略
-
-所有策略实现 `RecoveryStrategy` 接口（`src/recovery/types.ts:259-264`），通过 `registerBuiltinStrategies()` 注册（`src/recovery/strategies/index.ts:20-28`）：
-
-| 策略 | 文件 | 行为 |
-|---|---|---|
-| `retry` | `src/recovery/strategies/retry-strategy.ts` | 指数退避重试（`backoff_ms * backoff_factor^attempt`），直到达到 `max_retries` |
-| `compact` | `src/recovery/strategies/compact-strategy.ts` | 调用 client 的 session.compact() 压缩会话上下文 |
-| `fallback_model` | `src/recovery/strategies/fallback-model-strategy.ts` | 使用备选模型重新提示（通过 `promptAsync` 注入恢复指令） |
-| `remind_and_retry` | `src/recovery/strategies/remind-and-retry-strategy.ts` | 注入提示文本到系统 prompt，然后重试——适用于编辑错误和 JSON 解析错误 |
-| `truncate` | `src/recovery/strategies/truncate-strategy.ts` | 注入截断指令，要求模型将输出减少到指定的 `target_ratio` |
-| `summarize` | `src/recovery/strategies/summarize-strategy.ts` | 注入总结指令或调用 API 进行上下文压缩 |
-| `abort` | `src/recovery/strategies/abort-strategy.ts` | 最终策略：注入中止消息并终止恢复链 |
-
-::: tip 这些策略各解决什么问题？
-- `retry`（重试）——应对临时性故障（网络抖动、服务端 5xx），等一会儿再试。
-- `compact`（压缩上下文）——会话历史太长、快撑爆上下文窗口时，把历史压一压再继续。
-- `fallback_model`（备用模型）——当前模型不可用或持续出错时，换一个模型再问一次。
-- `remind_and_retry`（提示重试）——模型输出格式不对（如编辑或 JSON 语法错误）时，提示它改正后再试。
-- `truncate`（截断）——输出太长超出窗口时，要求模型把输出写短一些。
-- `summarize`（总结）——上下文太占空间时，先总结成摘要再继续。
-- `abort`（中止）——以上手段都失败时，明确告诉模型"放弃"，而不是静默卡住。
-:::
-
-### 策略链 (Strategy Chain)
-
-策略链是恢复系统的核心设计模式（`src/recovery/chain-executor.ts:26-123`）。每个错误类别可以配置一个有序的策略序列。当错误被捕获时，`RecoveryChainExecutor` 按顺序执行链中的策略，根据策略返回的状态决定流程：
-
-- **`success`** → 恢复成功，清除状态
-- **`retry`** → 再次执行当前策略（支持延迟等待）
-- **`next_strategy`** → 前进到链中的下一个策略
-- **`abort`** → 中止整个恢复链，向模型注入终止消息
-
-默认配置（`src/recovery/config.ts:48-78`）定义了以下策略链：
-
-| 错误类别 | 默认链 |
-|---|---|
-| `session_error` | retry(2次, 指数退避) → compact → abort |
-| `context_window` | truncate(最多8次, 50%压缩比) → summarize → abort |
-| `edit_error` | remind_and_retry(2次) |
-| `json_error` | remind_and_retry(2次) |
-| `empty_response` | remind_and_retry(1次) |
-
-### 恢复策略组合最佳实践
-
-合理编排策略链可以显著提升恢复成功率。以下三条原则来自实际部署经验（策略名称均源于 `src/recovery/config.ts:88-96` 的内置注册表）。
-
-#### 1. 始终以 `abort` 结尾
-
-每个策略链的最后一个策略应为 `abort`，确保恢复失败时能向模型注入明确的中止消息，而非静默失败。默认链已遵循此原则（`session_error` 和 `context_window` 均以 `abort` 结尾），自定义链中也应保持。
-
-```yaml
-# ✅ 推荐：以 abort 结尾
-session_error:
-  chain:
-    - strategy: retry
-    - strategy: compact
-    - strategy: abort   # ← 最终报告失败
-
-# ❌ 不推荐：链耗尽后无任何反馈
-session_error:
-  chain:
-    - strategy: retry
-    - strategy: compact  # 如果失败，模型得不到任何提示
-```
-
-#### 2. 策略链不超过 4 个环节
-
-每增加一个策略，恢复链的延迟和复杂性随之增长。超过 4 个环节的链往往因累积延迟而抵消恢复收益。建议将非核心策略放在并行链中，或提高前置策略的 `max_retries` 以减少不必要的链跳转。
-
-| 推荐配置 | 说明 |
-|---------|------|
-| `retry(2-3次)` → `compact` → `fallback_model` → `abort` | 4 环节以内，覆盖最常见的恢复路径 |
-| `truncate(多次)` → `summarize` → `abort` | 3 环节，足以应对上下文窗口溢出 |
-| `remind_and_retry(2次)` → `abort` | 2 环节，适用于编辑和 JSON 类错误 |
-
-#### 3. `remind_and_retry` 单独用于编辑/JSON 错误
-
-`remind_and_retry` 的行为是注入提示文本后请求模型原地重试，与 `retry`（指数退避重试）的机制不同。对于 `edit_error` 和 `json_error` 类别，`remind_and_retry` 比重试更有效，因为这两类错误的根因是模型输出格式问题而非服务端暂时故障——重试一段时间后再次调用并不会自行修复。
-
-```yaml
-edit_error:
-  chain:
-    - strategy: remind_and_retry
-      config:
-        max_retries: 2
-        reminder_text: "[EDIT ERROR] 请重新读取文件后重试"
-
-json_error:
-  chain:
-    - strategy: remind_and_retry
-      config:
-        max_retries: 2
-        reminder_text: "[JSON 错误] 修正 JSON 语法后重试"
-```
-
-::: tip 调试新策略链
-部署新策略链前，建议先在开发环境中使用 `rolebox info --check` 验证配置是否生效。然后通过观察日志前缀 `recovery:chain` 确认策略按预期顺序执行。详见下方「调试恢复系统」章节。
-:::
-
-### 配置
-
-恢复系统通过 `RecoveryConfig` 类型配置（`src/recovery/config.ts:31-37`）。关键配置项：
-
-- **`enabled`**：全局开关（默认 `true`），设为 `false` 可完全禁用恢复
-- **`maxTotalAttempts`**：单次会话的总尝试次数硬限制（默认 10）
-- **`persistState`**：是否将恢复状态持久化到磁盘
-- **`collectMetrics`**：是否收集恢复指标（计数、成功率等）
-- **`chains`**：按错误类别配置的策略链
-
-自定义策略可通过 `RecoveryEngine.registerStrategy()` 注册（`src/recovery/engine.ts:163-166`），同时使用 `addKnownStrategy()` 登记到已知策略列表（`src/recovery/config.ts:101-103`），确保 YAML 配置验证通过。
-
-> 完整的恢复系统详细架构说明见 [恢复系统参考](./recovery-system)。
-
-## 用户可见的错误消息
-
-以下错误是用户在使用过程中可能直接遇到的，以 `QueueFullError` 和 `WaiterTimeoutError` 两个核心类为代表（均在 `src/dispatch/concurrency/concurrency.ts` 中定义）。
-
-### `QueueFullError`
-
-当并发等待队列满时抛出。用户会看到类似以下消息：
-
-```
-Queue is full: 12 queued tasks (limit: 10)
-```
-
-包含的字段（`src/dispatch/concurrency/concurrency.ts:49-61`）：
-- `depth`：当前排队任务数
-- `limit`：队列最大深度
-- `retryAfter`：建议重试延迟（默认 30000ms）
-
-此错误通常在 `maxQueueDepth` 和 `maxConcurrent` 配置过小时出现。建议增加 `maxConcurrent` 或 `maxQueueDepth` 的值，或在 `role.yaml` 的 `dispatch:` 块中调整。
-
-### `WaiterTimeoutError`
-
-当任务在队列中等待超过 TTL 后超时抛出。用户会看到：
-
-```
-Waiter timed out after 300000ms for key "anthropic/claude-sonnet"
-```
-
-默认 TTL 为 300 秒（5 分钟）（`src/dispatch/concurrency/concurrency.ts:46`）。如果任务在排队阶段持续等待超过此时间，该任务被自动取消。建议检查模型响应速度或增加模型的并发槽位数。
-
-### 预算超限
-
-预算限制由 `BudgetTracker` 管理（`src/dispatch/budget/budget-tracker.ts:148-203`），超限时用户会看到类似以下消息：
-
-```
-Request cost budget exhausted: 0.52 >= 0.5
-Session input token budget exhausted: 52410 >= 50000
-```
-
-预算超限的任务会被自动取消，并在下次轮询时记录到指标中。
-
-> **注意：** 这些预算限制字段（`maxInputTokensPerRequest` / `maxOutputTokensPerRequest` / `maxCostPerRequest` / `maxInputTokensPerSession` / `maxCostPerSession`）**不属于** `role.yaml` 的 `dispatch:` 块——解析器只接受 11 个并发 / 队列 / 背压 / 超时字段，预算字段会被静默忽略。它们定义在 `DispatchManagerConfig`（`src/dispatch/config.ts:153-163`），必须通过编程式 `configOverrides` 注入 `createDispatchManager`（`src/dispatch/factory.ts:134-136`）。详见[调度配置](./dispatch-config#预算配置编程式)。
-
-## 按角色配置恢复策略
-
-恢复策略可以在每个角色的 `role.yaml` 的 `hooks.recovery` 块中按类别配置。配置结构遵循 `RecoveryConfig` 类型（`src/recovery/config.ts:31-37`）：
+恢复配置写在该角色 `role.yaml` 的 `hooks.recovery` 块里（**不是**顶层 `recovery:`）。字段级的完整清单见 [role.yaml 参考](/03-Reference/role-yaml)，这里给一份可直接改的配置：
 
 ```yaml
 hooks:
-  recovery:
-    enabled: true                   # 全局开关
-    max_total_attempts: 10          # 单次会话总尝试次数硬限制
-    persist_state: true             # 持久化恢复状态到磁盘
-    collect_metrics: true           # 收集恢复指标
+  builtin:
+    recovery: true            # 总开关：false 时不创建恢复引擎，也不运行内置恢复 Hook
+    edit_error: false         # 单独关掉编辑错误这一类 Hook
 
-    # 按错误类别配置策略链
-    session_error:
-      enabled: true
+  recovery:
+    enabled: true             # false = 保留 Hook，但不执行任何恢复策略
+    max_total_attempts: 15    # 一次链执行的尝试上限
+    persist_state: true       # 恢复状态落盘
+    collect_metrics: true     # 收集恢复指标
+
+    session_error:            # 写了 chain 就完全替换默认链
       chain:
         - strategy: retry
           config:
@@ -259,10 +93,7 @@ hooks:
         - strategy: fallback_model
         - strategy: abort
           config:
-            message: "会话失败，已尝试所有恢复手段"
-
-    edit_error:
-      enabled: false                 # 禁用编辑错误的自动恢复
+            message: 会话失败，已尝试全部恢复手段
 
     json_error:
       chain:
@@ -272,83 +103,85 @@ hooks:
             reminder_text: "请检查 JSON 语法后重试"
 ```
 
-### 完全禁用恢复
+两个开关的区别值得记牢，它们管的是不同层次：
 
-将 `enabled: false` 可以完全禁用整个恢复系统（`src/recovery/engine.ts:70-72`）：
+| 开关 | 关掉之后 |
+|---|---|
+| `hooks.builtin.recovery: false` | 内置恢复 Hook 不再挂载，恢复引擎不再创建——错误检测与提示注入都不会发生，错误直接抛给上层调用方 |
+| `hooks.recovery.enabled: false` | Hook 照常挂载，但引擎不做任何恢复尝试；Hook 检测到错误后不会注入任何提示 |
+| `hooks.builtin.<类别>: false` | 只有该类的内置 Hook 不再拦截（例如 `edit_error`），其它类别不受影响 |
 
-```yaml
-hooks:
-  recovery:
-    enabled: false
-```
+其余两条边界：
 
-禁用后，所有错误检测和策略链都不会执行，错误直接抛出到上层调用方。
+- 恢复引擎只在 opencode 组合根中装配；pi 与 dsh 下这份配置不生效，详见[平台与 Harness](/01-Overview/platform-harnesses)。
+- 进程内有多个角色声明了 `hooks.recovery` 时，只采用**第一个**声明者的配置。
+- 未知策略名会被记录警告并跳过，不会导致角色加载失败——链里少了那一步，但其它步骤照常执行。
 
-::: tip 自定义恢复策略注册
-除了内置的 7 种策略外，你可以通过两种方式添加自定义策略：
-1. **扩展机制**：在 `extensions.recovery_strategies` 中声明模块（见[扩展机制](./extensions)）。
-2. **API 注册**：通过 `RecoveryEngine.registerStrategy()`（`src/recovery/engine.ts:163-166`）注册策略实例，并调用 `addKnownStrategy()`（`src/recovery/config.ts:101-103`）登记到已知策略列表，确保 YAML 配置验证通过。
+## 错误消息的含义
 
-两种方式都需要在自定义策略模块中实现 `RecoveryStrategy` 接口（`src/recovery/types.ts:259-264`）。
-:::
+| 消息（节选） | 出现位置 | 含义与处理 |
+|---|---|---|
+| `Skipping "<角色>": invalid YAML`、`… missing or invalid "name" field`、`… must provide "prompt" or "prompt_file"` | 日志 | 该角色的 `role.yaml` 没有通过加载校验，角色被跳过。按消息提示补全字段 |
+| `Skipping "<角色>": role ID must not contain "--"` | 日志 | 目录名里有 `--`。改名即可 |
+| `Failed to load custom hook module` / `Failed to load extension module` | 日志 | 该模块被跳过。检查模块路径与导出，其它功能不受影响 |
+| `Skill "<名字>" not found` / `Function "<名字>" not found` | 日志 | 声明了但没找到文件；消息里会列出搜索过的位置 |
+| `Failed to create session: empty response` | 任务记录 | 平台拒绝创建子代理会话且没给原因；该任务进入 `error` |
+| `Rejected by parent` | 任务记录 | 父会话拒绝了这个任务 |
+| `Session lost after process restart — You can re-dispatch with dispatch(...)` | 任务记录 | 进程重启后原会话不可恢复。消息文本沿用旧工具名，实际用 `task_retry` 重开该任务 |
+| `Task result expired: <任务 ID>` / `Task result fetch error: …` | `task_export` 等工具输出 | 结果已过保留期（终态任务记录默认保留 30 分钟，结果 sidecar 默认保留 1 小时）或抓取失败 |
+| `Request/Session input token budget exhausted: {已用} >= {上限}` 等五条模板 | 任务记录 | 触发预算上限，任务被取消。预算只能编程式注入，见[调度配置](/03-Reference/dispatch-config) |
+| `Operation "materialize" timed out after 10000ms` | 日志 | 抓取子代理结果超时；同一原因在结果引用上表现为 `fetchError: "timeout"` |
+| 任务状态 `error` / `timeout` / `cancelled` | `task_search`、`graph_status` | 三种失败终态：启动或执行失败 / 超过 stale 超时 / 被主动取消 |
 
-## 调试恢复系统
+## 排查步骤
 
-### 检查恢复配置是否生效
+按顺序做这四件事，多数问题在第二步就能定位。
 
-使用 `rolebox info <role> --check` 可验证角色的恢复配置：
+**第一步：看整体健康。** `rolebox status` 报告已安装角色、技能符号链接与 opencode 集成状态。要确认某个角色是否真的被加载，看日志里的 `Skipping …` 消息——安装清单里有它，不代表它加载成功。
 
 ```bash
-rolebox info my-role --check
+rolebox status
 ```
 
-命令输出包含恢复系统状态信息：
-- 恢复系统是否启用（`hooks.recovery.enabled`）
-- 已注册的策略列表（通过 `RecoveryEngine.getStrategyRegistry().names()`）
-- 各错误类别的策略链配置
-
-### 恢复指标快照
-
-通过 `RecoveryEngine.getMetrics()`（`src/recovery/engine.ts:172-174`）获取运行时指标快照，可用于诊断恢复行为的健康状况：
-
-```
-totalAttempts: 15          # 总恢复尝试次数
-successfulRecoveries: 12   # 成功恢复次数
-abortedChains: 2           # 被中止的链数
-exhaustedChains: 1         # 耗尽的链数
-byCategory:
-  session_error:
-    attempts: 8
-    successes: 6
-  edit_error:
-    attempts: 7
-    successes: 6
+```text
+应看到：示例输出，随环境略有差异
+Rolebox v1.9.0
+（角色列表；每个角色带版本与注册中心）
+Skill symlinks (n): all valid
 ```
 
-### 日志前缀
+**第二步：看恢复日志。** 日志默认写在项目的 `.rolebox/logs/rolebox.log`，可用 `ROLEBOX_LOG_FILE` 指定别的路径；`ROLEBOX_LOG_LEVEL=debug` 可提高详细度。恢复相关组件各用自己的前缀，下面这条命令直接看恢复动作：
 
-恢复系统各组件使用独立的结构化日志器（`src/recovery/engine.ts:12`）：
+```bash
+grep -o "RecoveryEngine initialized\|Starting recovery chain\|Recovery successful\|Recovery aborted\|Recovery exhausted\|Unknown recovery strategy" .rolebox/logs/rolebox.log | tail -n 20
+```
 
-| 日志前缀 | 来源 | 典型消息 |
-|----------|------|---------|
-| `recovery:engine` | `src/recovery/engine.ts` | `RecoveryEngine initialized` / `Starting recovery chain` / `Recovery successful` |
-| `recovery:state` | `src/recovery/state.ts` | 状态持久化相关 |
-| `recovery:metrics` | `src/recovery/metrics.ts` | 指标收集相关 |
-| `recovery:chain` | `src/recovery/chain-executor.ts` | 策略链执行过程 |
-| `ext:loader` | `src/extensions/loader.ts` | 自定义恢复策略模块加载 |
+```text
+应看到：示例输出，随环境略有差异——命中的是消息文本
+RecoveryEngine initialized
+Starting recovery chain
+Recovery successful
+```
 
-### 常见问题排查
+各前缀的归属：`recovery:engine`（引擎初始化、链起止）、`recovery:config`（配置解析；未知策略名在这里告警）、`recovery:chain-executor`（策略链逐步执行）、`recovery:state`（状态持久化）、`recovery:metrics`（指标收集）、`recovery:startup-check`（启动时的状态文件检查与隔离）、`ext:loader`（扩展模块加载）、`hook:custom-loader`（自定义 Hook 加载）。
+
+**第三步：确认配置真的生效。** `rolebox info <角色> --check` 做的是角色完整性校验（校验和、同步状态），**不显示恢复配置**；要确认恢复配置是否被接受，看引擎初始化那条日志：它带出 `enabled`、已装配的链类别与已注册策略名，未知策略名则在 `recovery:config` 里被点名。另外，配置写在顶层 `recovery:` 下不会有任何效果。
+
+恢复指标（每个类别的尝试次数与成功数）在启用 `ROLEBOX_METRICS` 后随调度指标一起写入状态目录的 metrics 文件，快照字段见[恢复系统](/03-Reference/recovery-system)。
+
+**第四步：手动补救。** 自动恢复管不到的东西可以手工处理：`task_search` 找到失败任务，`task_retry` 重开它的会话（终态任务才可以重试，原会话上下文保留），`task_export` 在结果过期前把内容落盘。
 
 | 症状 | 可能原因 | 检查点 |
-|------|---------|--------|
-| 错误未被恢复 | 类别无对应策略链 | 检查 `hooks.recovery.{category}.enabled` 是否为 `false` |
-| 自定义策略未生效 | 未调用 `addKnownStrategy()` | 验证 `src/recovery/config.ts:101-103` 是否已调用 |
-| 恢复状态持续增长 | `persistState: true` 但未清除 | 检查恢复成功后 `stateStore.delete()` 是否调用（`src/recovery/engine.ts:149-150`） |
-| 恢复链始终失败 | `maxTotalAttempts` 过小 | 默认 10 次，可在 `role.yaml` 中增加 |
-| 重试后任务状态丢失 | 未使用 `dispatch_checkpoint` 持久化中间状态 | 在任务执行过程中调用 `dispatch_checkpoint()` 保存阶段状态，失败重试时可自动注入上下文避免重复工作。详见[工具目录](./tool-catalog#dispatch_checkpoint) |
+|---|---|---|
+| 错误完全没有被恢复 | 该类别的 Hook 被关掉，或类别没有链 | `hooks.builtin.<类别>` 是否为 `false`；`hooks.recovery.<类别>` 是否只写了 `enabled: false` 而没写 `chain` |
+| 链走到一半就停了 | 一次链执行的尝试次数用尽 | 日志里的 `global attempt limit reached`；提高 `max_total_attempts` |
+| 改了配置但行为不变 | 配置位置不对，或不是第一个声明者 | 是否写在 `hooks.recovery` 下；是否有多角色同时声明 |
+| 自定义策略不生效 | 策略名未登记为已知策略 | `recovery:config` 的 `Unknown recovery strategy` 警告 |
+| 恢复后任务状态丢失 | 终态任务记录超过 TTL 被清出 | 终态记录默认保留 30 分钟；需要留存就提前 `task_export` |
 
-> 恢复系统详细架构说明见[恢复系统参考](./recovery-system)。
+## 相关
 
-## 下一步
-
-- [已知限制](./limitations) — 当前版本的已知功能限制
+- [恢复系统](/03-Reference/recovery-system) — 恢复引擎内部机制
+- [已知限制](/03-Reference/limitations) — 每个子系统的边界与规避方式
+- [Hook 机制](/03-Reference/hooks) — 自定义 Hook 的事件与生命周期
+- [扩展机制](/03-Reference/extensions) — 自定义恢复策略与错误模式的注册入口

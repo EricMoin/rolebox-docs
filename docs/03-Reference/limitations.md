@@ -1,192 +1,98 @@
 ---
 title: 已知限制
-description: rolebox 当前版本已知限制 — 角色继承、运行时切换、函数持久化、子代理嵌套深度
+description: rolebox v1.9.0 的已知限制清单——按子系统列出限制、撞上它的条件，以及可以采用的规避方式。
 ---
 
-# 已知限制
+# 已知限制（Known Limitations）
 
-> **相关文档：** [错误处理](/03-Reference/error-handling) — 错误容忍机制 | [调度配置](/03-Reference/dispatch-config) — 调度系统限制与配置 | [Hook 机制](/03-Reference/hooks) — Hook 限制
+本页列出 rolebox v1.9.0 中确实会撞上的边界。每条都写成可判定的形式：**限制**是什么、**什么情况下会撞上**、**怎么绕开**。这里不区分「有意为之」与「暂时如此」——只回答「我现在会不会被卡住」。
 
-以下是 rolebox 当前版本（v1.x）的已知功能限制。
+> 相关：[错误处理](/03-Reference/error-handling)｜[调度配置](/03-Reference/dispatch-config)｜[平台与 Harness](/01-Overview/platform-harnesses)｜[兼容性](/04-Advanced/compatibility)
 
-## 限制一览
+## 角色与函数模型
 
-| 限制 | 说明 | 应对策略 |
+| 限制 | 什么情况下会撞上 | 规避方式 |
 |---|---|---|
-| **无角色继承** | 角色之间不支持继承或组合机制，每个角色是独立定义 | 通过技能（skills）和引用（references）共享通用配置；利用子代理（subagents）实现功能组合与分层复用 |
-| **无运行时角色切换** | 会话启动后不能动态切换角色 | 预先定义多个子代理在不同工作模式下并行激活；或退出当前会话后以新角色身份重新启动 |
-| **函数全会话持久化** | 函数在整个会话期间持续激活，暂不支持按消息级别激活/停用 | 通过条件函数设计控制函数的生效范围；利用子代理隔离不同阶段所需的函数上下文 |
-| **无项目上下文条件函数** | 不支持根据项目上下文（如文件类型、目录结构）条件性地激活函数 | 在角色初始化阶段手动识别项目类型；为不同项目类型分别定义专用角色并在需要时切换 |
-| **子代理嵌套深度上限** | 基于文件的递归子代理嵌套最高支持 3 层（父 → 子 → 孙） | 将超出深度的子代理以内联方式声明在父级 role.yaml 的 `subagents:` 字段中；或将深层子代理扁平化为中间层引用 |
-| **`--` 为保留字符** | `--` 在角色 ID 中作为父/子代理分隔符使用，不可用于命名 | 使用 `-` 或 `.` 等替代分隔符；避免在角色名称中包含 `--` 组合 |
+| 角色之间没有继承机制 | 想在角色 A 的 `role.yaml` 里继承角色 B 的配置——没有对应字段，只能在每个角色里重复声明 | 用技能（skills）与引用文档（references）共享知识；用子代理做组合。注意子代理**会**继承父角色的 `model`、`color`、`variant`、`temperature`、`top_p`、`permission`、`tools` 七个字段，未显式覆盖即沿用父值 |
+| 会话内不能切换角色 | 会话已经以某个角色启动，想中途换成另一个角色继续干活 | 把要换的活交给子代理；或退出当前会话，以另一个角色重新开始 |
+| 函数激活是会话级的 | 用激活前缀打开的函数的整个会话里保持激活，做不到「只对下一条消息生效」 | 用 `transitions` 配 `deactivate`，让函数在条件满足时自行停用；用 `disable_functions` 在角色级排除；把不同阶段放进不同子代理 |
+| 内置条件不包含项目上下文 | 想「文件是 TypeScript 就激活这个函数」这类按项目结构判断的激活方式——内置条件只有会话与函数状态：`user_approval`、`artifact_exists`、`plan_todos_complete`、`plan_incomplete`、`evidence_met`、`tool_observed`、`signal_observed`、`turn_count`、`state_eq`（可用 `all` / `any` / `not` 组合） | 通过扩展作用域 `conditions` 注册自定义条件模块（导出 `handler(arg, env)`）；或先用工具把项目特征写进 artifact 与运行时状态，再用 `artifact_exists`、`state_eq` 判断 |
+| `--` 是保留分隔符 | 角色目录名里含 `--`（例如 `code--reviewer`）——该角色会被跳过，日志提示 `role ID must not contain "--"` | 用 `-`、`_`、`.` 之类分隔符；子代理 ID 里的 `--` 是系统拼出来的，不要手工使用 |
 
-## 详细说明
+## 子代理与调度
 
-### 无角色继承
-
-每个角色通过 `role.yaml` 独立定义，不允许从一个角色继承另一个角色的配置（如函数、技能、权限等）。如果多个角色需要共享配置，目前需要通过复制或引用来实现。
-
-### 无运行时角色切换
-
-角色在会话初始化时确定，会话运行期间不能切换为其他角色。如果需要在不同角色之间切换工作模式，需要通过子代理调度来实现。
-
-### 函数全会话持久化
-
-通过 `functions:` 字段激活的函数会在整个会话生命周期内保持激活状态。当前不支持按消息粒度动态启用/禁用函数。
-
-### 子代理嵌套深度上限
-
-子代理可以通过文件目录进行递归嵌套，但深度上限为 3 层（父 → 子 → 孙 → 曾孙）。超过深度限制的子代理将无法加载。
-
-## 各子系统限制
-
-### 调度系统（Dispatch）
-
-| 限制 | 默认值 | 说明 |
+| 限制 | 什么情况下会撞上 | 规避方式 |
 |---|---|---|
-| **模型并发槽位数** | 5 | 每个模型密钥（`providerID/modelID`）的并发执行上限。详见 `concurrency.ts:92` |
-| **保留槽位数** | 1 | 保留给同步（sync）任务的槽位，后台任务可用上限为 `limit - reserved`（即 4 个）。详见 `concurrency.ts:92` |
-| **队列最大深度** | 10 | 等待队列最大长度，超出时返回 `QueueFullError`。详见 `concurrency.ts:92` |
-| **等待超时** | 300 秒（5 分钟） | 队列中等待超时后抛出 `WaiterTimeoutError`，详见 `concurrency.ts:46` |
-| **子代理嵌套深度** | 3 层 | 基于文件的子代理递归解析最大深度，超过深度限制的层级被忽略。详见 `subagents.ts:237` |
-| **通知间隔** | 2 秒 | `loop` 模块中连续轮次之间的最小延迟。详见 `loop/constants.ts:14` |
+| 文件式子代理最多递归 3 层 | 目录嵌套到第 4 层（`subagents/<子>/subagents/<孙>/subagents/<曾孙>/subagents/<玄孙>/role.yaml`）时，该层的 `role.yaml` 不会被加载，且没有报错 | 把更深的层级内联声明在父级的 `subagents:` 字段里，或把深层子代理扁平化到中间层 |
+| 后台任务 stale 超时默认 15 分钟 | 后台任务连续无进展超过 `backgroundStaleTimeoutMs`（默认 `900000` ms）即被判为 `timeout` | 在派发到该任务的图节点上声明 `budget.timeout_ms`（它成为该任务的硬超时，覆盖后台默认值）；或在 `role.yaml` 的 `dispatch:` 块里调整 `backgroundStaleTimeoutMs` |
+| 同步提示词超时默认 10 分钟 | 同步调度（sync）等待子代理提示词完成，超过 `syncPromptTimeoutMs`（默认 `600000` ms）即失败 | 改为后台任务；或在 `dispatch:` 块里调整 `syncPromptTimeoutMs` |
+| 终态任务记录只保留 30 分钟 | 任务结束后超过 `taskTtlMs`（默认 `1800000` ms），记录被清出：查不到、也无法再重试 | 需要留存就用 `task_export` 提前落盘；结果 sidecar 文件默认保留 1 小时（`resultRetentionMs`），同样会过期 |
+| 结果物化超时 10 秒 | 抓取子代理结果超过 `materializeTimeoutMs`（默认 `10000` ms）时，结果引用上的 `fetchError` 记为 `timeout`、sidecar 留空 | 重试该任务；或让子代理把结果写进工作区文件，而不是只放在回复文本里 |
+| 调度层不设并发槽位上限 | 一次派发大量后台任务时它们会直接全部启动；卡住的任务只能靠 stale 超时与看门狗（reconcile 15 秒、全局 sweep 30 秒）兜底回收 | 在派发侧自行控制并发；给每个图节点设置合理的 `budget.timeout_ms` |
+| 预算用量按 30 秒采样 | `budgetSampleIntervalMs` 默认 `30000` ms，两次采样之间可能已多消耗一些配额才触发取消 | 给预算留出余量；预算上限只能编程式注入，见[调度配置](/03-Reference/dispatch-config) |
 
-### 记忆系统（Memory）
+## 图与循环
 
-| 限制 | 默认值 | 说明 |
+| 限制 | 什么情况下会撞上 | 规避方式 |
 |---|---|---|
-| **存储后端** | bun:sqlite（WAL 模式） | 使用 `bun:sqlite` 作为持久化引擎，启用 WAL 日志模式以提高并发性能。详见 `store.ts:28-29` |
-| **全文检索引擎** | FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5） | 基于 SQLite FTS5 虚拟表，自动同步 `title`、`content`、`tags` 字段。详见 `schema.ts:29-34` |
-| **列表默认上限** | 20 条 | `memory_list` 未指定 `limit` 时最多返回 20 条摘要记录。详见 `store.ts:212` |
-| **搜索默认上限** | 10 条 | `memory_recall` 未指定 `limit` 时最多返回 10 条完整记录。详见 `search.ts:42` |
-| **自动注入上限** | 10 条 | 会话启动时自动注入系统提示的记忆摘要最大数量。详见 `types.ts:13` |
-| **分类维度** | scope / category / relevance | 支持按作用域、分类和相关性等级过滤；tags 和 source_sessions 以 JSON 数组存储 |
+| 循环组必须声明遍历硬上限 | `loop_groups[].max_traversals` 是必填（整数、≥ 1）：图声明里漏写会解析报错；用 `graph_add_loop` 时小于 1 会被直接拒绝 | 按「最多允许评审几轮」给一个明确的值 |
+| 达到硬上限后升级而非继续 | 还有 `revise_needed` 但遍历次数已到 `max_traversals` 时，循环组以 `max_traversals exhausted` 升级（escalate），携带未解决项与遍历计数 | 提高 `max_traversals`；或检查上游节点为什么反复要求修订 |
+| 连续两次相同收敛结果会被判为卡住 | 相邻遍历的收敛输出完全相同、累计达到 2 次时，循环组以 `stuck` 升级，且不再消耗遍历次数 | 让收敛节点的输出携带区分信息；或把不收敛的原因当成节点缺陷来修 |
+| 图声明上的迭代上限字段不生效 | 在声明里写图级 `max_iterations` 不起作用——它只作为往返解析用的元数据保留；真正生效的是循环组的 `max_traversals` | 一律用 `max_traversals` 表达「最多几轮」 |
+| `graph_add_loop` 的 `mode: "fresh"` 不受支持 | 想让每一轮循环在互相隔离的会话里执行时选择 `fresh`，会得到明确的错误而不是该行为 | 每一轮建一张独立的图来获得会话隔离；不需要隔离时用默认的 `inherit` |
+| 循环次数与轮次开销有硬上限 | 未指定 `iterations` 时默认 5 轮；单次循环最多 50 轮；每个 dispatch 轮次最长 15 分钟；相邻轮次之间至少间隔 2 秒；送入摘要器的轮次输出与合并后的种子各上限 8000 字符 | 显式给 `iterations`；把长任务拆成多轮；把关键上下文写进文件或 artifact，避免被摘要截断 |
 
-### 图编排系统（Graph）
+## 记忆系统
 
-| 限制 | 默认值 | 说明 |
+| 限制 | 什么情况下会撞上 | 规避方式 |
 |---|---|---|
-| **最大迭代次数（含环图）** | 3 次 | 当图中检测到环（cycle）且未显式设置 `max_iterations` 时，默认上限为 3 次。详见 `parser.ts:80-81` |
-| **最大迭代次数（无环图）** | 无限制（0） | 无环图默认不限制迭代次数。详见 `parser.ts:82-83` |
-| **用户自定义上限** | 由 `max_iterations` 字段指定 | 支持在 graph 配置中显式设置，最小值为 0。详见 `parser.ts:44-47` |
-| **环组独立上限** | 通过 termination 配置 | 每个 loop group 可单独设置 `maxIterations`，互不干扰。详见 `termination.ts:49` |
+| 默认返回条数有限 | `memory_list` 不给 `limit` 时最多返回 20 条摘要；`memory_recall` 不给 `limit` 时最多返回 10 条完整记录；会话启动时自动注入的记忆摘要上限为 10 条 | 显式传 `limit`；用 `scope`、`category`、`relevance` 过滤缩小范围 |
+| 依赖 SQLite，Node 侧要求 ≥ 22.5 | Node 运行时走 `node:sqlite`（自 Node 22.5 起提供）；Bun 运行时走 `bun:sqlite` | 用 Node 22.5 及以上，或直接用 Bun；记忆库启用 WAL 日志模式 |
+| 全文检索依赖 SQLite FTS5 虚拟表 | 记忆库用 FTS5 建全文索引；所在运行时的 SQLite 未带 FTS5 时，建表与搜索都会失败 | 用 `bun:sqlite` 或 `node:sqlite` 自带的 SQLite（两者均支持 FTS5）；记忆库的驱动按运行时自动选择，没有配置项可换 |
 
-### 循环执行系统（Loop）
+## 通知
 
-| 限制 | 默认值 | 说明 |
+| 限制 | 什么情况下会撞上 | 规避方式 |
 |---|---|---|
-| **默认迭代次数** | 5 次 | 未指定 `iterations` 参数时的默认循环轮次。详见 `constants.ts:2` |
-| **硬上限** | 50 次 | 单次循环的最大轮次，防止失控执行。详见 `constants.ts:5` |
-| **单轮超时** | 900 秒（15 分钟） | 每个 dispatch 轮次的最长等待时间。详见 `constants.ts:8` |
-| **轮次间隔** | 2 秒 | 连续轮次之间的最小延迟，避免瞬态负载。详见 `constants.ts:14` |
-| **摘要输入上限** | 8,000 字符 | 每次轮次输出送入摘要器的最大字符数。详见 `constants.ts:17` |
-| **种子字符上限** | 8,000 字符 | 合并后预置到下一轮次的摘要最大字符数。详见 `constants.ts:20` |
+| 原生通知依赖平台命令行工具 | 平台命令不在 `PATH` 中时该通道**静默跳过**（不报错、不影响其它通道） | 安装对应工具，或改用没有外部依赖的 `file` / `log` / `webhook` 通道 |
+| Webhook 默认 5 秒超时 | 目标端点响应慢于 5 秒时该次投递失败 | 换更快的端点；或改用 `custom-command` 通道自行控制超时 |
 
-### 通知系统（Notifications）
-
-| 通道 | 平台支持 | 说明 |
-|---|---|---|
-| **SystemToast** | macOS（terminal-notifier / osascript）、Linux（notify-send）、Windows（PowerShell） | 原生系统通知，各平台依赖不同命令行工具。详见 `system-toast.ts` |
-| **Sound** | macOS（afplay）、Linux（paplay / aplay 回退）、Windows（PowerShell SoundPlayer） | 播放通知音效，需要对应平台音频播放工具。详见 `sound.ts` |
-| **File** | 全平台 | 以 JSONL 格式追加写入文件，无平台依赖。详见 `file.ts` |
-| **Log** | 全平台 | 写入结构化日志，无平台依赖。详见 `log.ts` |
-| **Webhook** | 全平台（依赖网络可达） | HTTP POST 到指定 URL，支持自定义请求头和超时（默认 5 秒）。详见 `webhook.ts:21` |
-| **CustomCommand** | 全平台 | 通过子进程执行自定义命令，参数以环境变量传递，支持 stdin 输入。详见 `custom-command.ts` |
-
-### 哈希行系统（Hashline）
-
-| 限制 | 默认值 | 说明 |
-|---|---|---|
-| **小文件哈希宽度** | 2 位 | 文件 ≤ 1000 行时使用，提供 64² = 4,096 个不重复桶。详见 `constants.ts:6` |
-| **中文件哈希宽度** | 3 位 | 文件 1001–10000 行时使用，提供 64³ = 262,144 个桶。详见 `constants.ts:7` |
-| **大文件哈希宽度** | 4 位 | 文件 > 10000 行时使用，提供 64⁴ = 16,777,216 个桶。详见 `constants.ts:8` |
-| **环境变量覆盖** | `ROLEBOX_HASHLINE_WIDTH` | 可覆盖自动选择的哈希宽度。详见 `constants.ts:14` |
-| **校验正则** | `/^(\d+)#([A-Za-z0-9_-]{2,4})$/` | 哈希引用格式为 `行号#哈希`，宽度限制 2-4 位。详见 `constants.ts:18` |
-| **模糊搜索窗口** | ±10 行 | 定位失败时在目标行前后各 10 行内搜索匹配内容。详见 `constants.ts:27` |
-
-### 平台命令依赖
-
-通知后端通过平台特定的命令行工具发送通知（`src/notifications/platform.ts`）：
+平台命令对照：
 
 | 平台 | SystemToast | Sound |
-|------|-------------|-------|
-| macOS | `terminal-notifier` 或回退到 `osascript` | `afplay` |
-| Linux | `notify-send` | `paplay`，回退到 `aplay` |
-| Windows | PowerShell | PowerShell (`SoundPlayer`) |
+|---|---|---|
+| macOS | `terminal-notifier`，缺失时回退 `osascript` | `afplay` |
+| Linux | `notify-send` | `paplay`，缺失时回退 `aplay` |
+| Windows | PowerShell | PowerShell（`System.Media.SoundPlayer`） |
 
-如果目标平台缺少对应的命令行工具，通知静默降级（跳过该通道），不会报错。
+六个通道里，`file`（JSONL 追加写）、`log`（结构化日志）、`custom-command`（子进程，参数经环境变量传入）没有平台命令依赖；`webhook` 只要求网络可达。
 
-::: tip 升级注意事项
-从 v0.12.0 开始，状态存储从 `XDG_DATA_HOME` 迁移到项目本地 `.rolebox/` 目录。如果你从更早版本升级，旧的状态文件不会自动迁移。升级后建议先运行 `rolebox status` 确认所有子系统正常工作。详见[兼容性](/04-Advanced/compatibility#v0-12-0-状态存储迁移)。
-:::
+## 哈希行编辑
 
-## 外部工具限制
+| 限制 | 什么情况下会撞上 | 规避方式 |
+|---|---|---|
+| 锚点会因外部改动失效 | 读取之后文件被别的进程（或你自己用其它工具）改过，`hashline_edit` 会报 anchor not found、version mismatch 或 hashWidth mismatch | 按提示重新执行 `hashline_read` 取回新的锚点与版本号再改；不要跨编辑复用旧锚点 |
+| 哈希宽度随文件大小变化 | 文件超过 1000 行后宽度由 2 位升到 3 位，超过 10000 行升到 4 位；用旧的宽度提交会报 hashWidth mismatch | 用同一次读取返回的宽度；确需固定时用 `ROLEBOX_HASHLINE_WIDTH` 覆盖 |
+| 校验格式固定为 2–8 位哈希 | 锚点必须写成 `行号#哈希`，哈希由字母、数字、`_`、`-` 组成且长度 2–8 位 | 直接复制读取结果里的锚点，不要手写 |
+| 定位失败只在 ±10 行内模糊搜索 | 目标内容移动超过 10 行时模糊纠正找不到它，编辑失败 | 重新读取该区域；大范围移动后重建锚点 |
+| 文件不存在时无法用锚点编辑 | 对不存在的文件做锚点替换会报 `File not found` | 用无锚点的追加 / 前插操作创建文件 |
 
-### LSP 服务器（语言服务器协议，Language Server Protocol）
+## 外部工具依赖
 
-rolebox 内置的 LSP 服务器注册表（`src/lsp/servers.ts:9-122`）支持以下语言，每个语言对应一个外部服务器二进制文件：
+| 限制 | 什么情况下会撞上 | 规避方式 |
+|---|---|---|
+| LSP 功能要求本机装有语言服务器 | 注册表覆盖 TypeScript/JavaScript、Python、Go、Rust、C、C++、Java、Ruby、Bash、Lua、Kotlin；对应二进制不在 `PATH` 或常见安装目录时，该语言的诊断、跳转、补全不可用 | 安装对应服务器：`typescript-language-server`、`pyright-langserver`、`gopls`、`rust-analyzer`、`clangd`、`jdtls`、`solargraph`、`bash-language-server`、`lua-language-server`、`kotlin-lsp` |
+| JavaScript 渲染依赖可选包 | 未安装 Playwright 时，需要执行 JS 才能取到内容的页面退回静态 HTTP 抓取，抓到的内容不完整 | 安装 `playwright`；Crawlee 提供更进一步的爬取能力，同样可选 |
+| 自定义 Hook 的清理不是强制的 | Hook 模块没有导出 `onDispose` 时，关闭阶段不会为它调用任何清理逻辑 | 需要清理资源（子进程、临时文件、连接）的 Hook 请实现 `onDispose` |
 
-| 语言 | 服务器命令 | 根文件标记 |
-|------|-----------|-----------|
-| TypeScript/JavaScript | `typescript-language-server` | `tsconfig.json` / `package.json` |
-| Python | `pyright-langserver` | `pyproject.toml` / `setup.py` |
-| Go | `gopls` | `go.mod` |
-| Rust | `rust-analyzer` | `Cargo.toml` |
-| C/C++ | `clangd` | `compile_commands.json` / `CMakeLists.txt` |
-| Java | `jdtls` | `pom.xml` / `build.gradle` |
-| Ruby | `solargraph` | `Gemfile` |
-| Bash | `bash-language-server` | 自动检测 |
-| Lua | `lua-language-server` | `.luarc.json` |
-| Kotlin | `kotlin-lsp` | `build.gradle.kts` |
+## 平台差异
 
-如果对应服务器的二进制文件未在 `PATH` 或常见安装路径中找到，该语言的 LSP 功能（诊断、跳转定义、补全等）不可用（`src/lsp/servers.ts:226-233`）。
+| 限制 | 什么情况下会撞上 | 规避方式 |
+|---|---|---|
+| 恢复框架只在 opencode 上装配 | 在 pi 或 dsh 下配置 `hooks.recovery`，恢复策略与内置恢复 Hook 都不会运行 | 依赖自动恢复的能力放到 opencode；其它平台上按[错误处理](/03-Reference/error-handling)里的手工步骤处理失败任务 |
 
-### Web 搜索与渲染引擎
+## 相关
 
-Web 抓取功能依赖可选的浏览器自动化包（`src/web/browser-detect.ts:24-46`）：
-
-- **Playwright**：提供完整的 JS 渲染能力，用于抓取 SPA 和动态网页。
-- **Crawlee**：提供高级爬取功能。
-
-如果两者都未安装，web 抓取回退到静态 HTTP 请求模式，无法渲染 JavaScript 生成的内容。
-
-### TUI（终端用户界面，Terminal User Interface）
-
-rolebox 的终端 UI 默认支持 macOS 和 Linux 终端（如 iTerm2、Kitty、Terminator）。Windows 终端兼容性取决于使用的终端模拟器 —— PowerShell 和 Windows Terminal 的基本功能可用，但某些高级渲染特性（如 ANSI 转义序列）可能受限。
-
-## 已知边缘情况
-
-| 场景 | 表现 | 相关参考 |
-|------|------|---------|
-| **同时启动大量并发任务** | 超出 `maxConcurrent` + `maxQueueDepth` 的任务返回 `QueueFullError`，需等待重试 | [调度配置](./dispatch-config) |
-| **子代理长时间无响应** | 后台任务在 `backgroundStaleTimeoutMs`（默认 15 分钟）后标记为过期 | [调度配置](./dispatch-config) |
-| **队列中任务等待超时** | 超过 `WAITER_TTL_MS`（300 秒）后抛出 `WaiterTimeoutError` | [调度配置](./dispatch-config)、[错误处理](./error-handling) |
-| **图循环中代理卡住** | 达到 `max_iterations` 或 termination 条件后自动终止 | [错误处理](./error-handling) |
-| **预算限制触发后任务取消** | 采样间隔 `budgetSampleIntervalMs` 内可能多消耗一些配额 | [调度配置](./dispatch-config) |
-| **扩展模块加载失败** | 按模块捕获，记录警告，跳过该扩展，不会影响其他功能 | [扩展机制](./extensions) |
-| **Hook 模块加载失败** | 记录警告，Hook 被跳过，注册中心存储 `null` 并继续 | [Hook 机制](./hooks) |
-| **插件关闭时 Hook 未释放** | `onDispose` 确保在关闭时清理资源；如果模块未实现 `onDispose`，资源由进程回收 | [Hook 机制](./hooks) |
-| **环境变量插值未解析** | 保留原始 `{env:VARIABLE_NAME}` 文本，不做猜测性替换 | [调度配置](./dispatch-config) |
-| **通知通道平台命令缺失** | 通道静默降级，无报错；不影响其他功能 | 本页上方「平台命令依赖」 |
-| **并发策略自定义实现错误** | `concurrency_policies` 扩展加载失败仅影响该策略，回退到默认 `ConcurrencyManager` | [扩展机制](./extensions) |
-
-## 版本演进路线
-
-以下标记哪些限制属于有意设计约束（短期内不会改变），哪些在规划路线上可能调整。
-
-::: info 设计约束 vs 路线图
-「设计约束」标记的限制基于架构性决策，短期内不会改变——应将其视为系统的稳定边界来规划你的角色设计。「路线图待定」标记的限制在规划中可能调整，但无明确时间表。在受这些限制影响时，可以先采用「应对策略」列中建议的变通方案。
-:::
-
-| 限制 | 分类 | 说明 |
-|------|------|------|
-| **无角色继承** | 设计约束 | 角色模型基于组合（composition）而非继承（inheritance），通过子代理和技能复用实现模块化。此为架构性决策，不计划引入继承机制 |
-| **无运行时角色切换** | 路线图待定 | 技术上可通过 `dispatch()` 间接实现，但原生会话内角色切换需要更复杂的上下文管理机制 |
-| **函数全会话持久化** | 设计约束 | 函数激活模型与函数状态机的生命期绑定，按消息粒度激活/停用将显著增加状态管理复杂度。暂不在路线图中 |
-| **无项目上下文条件函数** | 路线图待定 | 条件函数是需求中高频出现的请求，可能在后续版本中通过扩展 `conditions` 系统增强 |
-| **子代理嵌套深度上限** | 路线图待定 | 当前 `maxDepth: number = 3` 在源码中为可调默认值（`src/loader/subagents.ts:237`），未来可能提高或开放配置 |
-| **`--` 为保留字符** | 设计约束 | 此分隔符是子代理 ID 路由机制的基础，无法变更 |
-
-## 下一步
-
-- [错误处理](./error-handling) — 了解 rolebox 的错误容忍与降级机制
+- [错误处理](/03-Reference/error-handling) — 每个故障场景的降级行为与排查步骤
+- [调度配置](/03-Reference/dispatch-config) — 上面出现的调度参数
+- [兼容性](/04-Advanced/compatibility) — harness 能力矩阵与破坏性变更

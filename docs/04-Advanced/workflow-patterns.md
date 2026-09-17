@@ -1,39 +1,39 @@
 ---
 title: 工作流模式
-description: rolebox 协作图内建拓扑结构与自定义工作流模式详解，包含 Mermaid 流程图与 YAML 配置示例
+description: Pipeline / Review-Loop / Star 三个内建拓扑与自定义拓扑的选型指南：何时用、边形状、用 graph_* 搭出来的最小步骤与常见错误
 ---
 
-# 工作流模式
+# 工作流模式（Workflow Patterns）
 
-> **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 图状态管理与 FSM（有限状态机，Finite State Machine）生命周期 | [终止条件](/04-Advanced/termination-conditions) — continue_until 条件与收敛检测 | [协作图](/02-Guide/collaboration-graph) — 内置拓扑与自定义流配置
+这一页回答「多个子代理协作，该选哪种结构」。**工作流模式（workflow pattern）**是对「谁先做、谁后做、谁可以并行、谁能把结果打回重做」的结构化表达；它只决定**边的形状**，真正让图跑起来的是八个 `graph_*` 工具。
 
-多个子代理协作时，工作该按什么顺序、什么结构流转？这就是**工作流模式**要回答的问题——它让你用最少的配置表达『谁先做、谁后做、谁可以并行、谁能把结果打回重做』。
+> 前置：[图工作流](/02-Guide/graph-workflows)｜相关：[图执行引擎](/04-Advanced/graph-engine)｜[图声明参考](/04-Advanced/graph-declaration)｜[编排工具参数](/03-Reference/tools/orchestration-tools)
 
-协作图（collaboration graph）定义了子代理之间的工作流转路径。rolebox 提供三种内建**拓扑**（topology，协作图的预设结构模式：pipeline 串行、review-loop 循环、star 并行）——**Pipeline**、**Review-Loop**、**Star**——同时支持通过显式 `flow` 边定义**自定义拓扑**，以及通过 `flow` 覆盖实现**混合模式**。
+rolebox 保留三个内建**拓扑（topology，图的预设结构模式）**名字：`pipeline`、`review-loop`、`star`。这三个名字描述形状；图声明里的 `template:` 字段本身不会替你建边（机制见[图声明参考](/04-Advanced/graph-declaration)），命令式路径下更没有这个参数——你要照着下面的边形状自己用 `graph_add_edge` 连出来。
 
-所有内建拓扑都走同一套流水线：先由模板展开，再解析校验，最后生成 `<collaboration_graph>` 指令注入到大模型系统提示中（源码定位见下方）。
+## 怎么选
 
-::: tip 源码定位
-- 拓扑扩展逻辑：`src/graph/templates.ts`
-- 配置解析：`src/graph/parser-v2.ts`
-- 拓扑校验：`src/graph/collaboration-validator.ts`
-- 提示块生成：`src/graph/prompt-builder.ts`
-:::
+| 你想要的效果 | 选用的模式 | 命令式骨架 |
+|---|---|---|
+| 串行接力，每一环吃上一环的输出 | Pipeline | `graph_create` + n 个节点 + n−1 条 `always` 边 |
+| 迭代评审，结果不达标就打回重做 | Review-Loop | Pipeline 的串行链 + 一条 `revise_needed` 回边 + `graph_add_loop` |
+| 互不依赖地并行开工 | Star（写法 A） | n 个节点彼此无边，全部是根节点 |
+| 并行后汇总 | Star（写法 B） | 各分支 + 一个汇聚节点 + 分支到汇聚的入边 |
+| 多入口汇合成一条管线、条件分叉 | 自定义拓扑 | 显式 `graph_add_edge` 搭 DAG，`on_condition` 做条件分叉 |
+| 人工把关（可叠加在任意模式上） | 审批门 | 节点 `needs_approval: true` + `graph_approve` |
 
----
-
-::: tip 拓扑选择指南
-- **Pipeline**：代理之间有明确的先后依赖关系（如 调研 → 写作 → 编辑）
-- **Review-Loop**：需要迭代审查和修订循环（如 编码 → 审查 → 修改 → 审查）
-- **Star**：各代理独立工作，无需相互依赖（如 同时分析前端/后端/数据库）
-- **自定义流**：上述三种无法覆盖的非标工作流
-:::
+每个模式都只用「建图 → 加节点 → 连边 → 运行」四步搭出来。工具语义见[图工作流](/02-Guide/graph-workflows)，参数与返回格式见[编排工具](/03-Reference/tools/orchestration-tools)。
 
 ## Pipeline（流水线）
 
-Pipeline 是最简单的拓扑：代理前后串联，前一代理的输出作为后一代理的输入，最后一个代理的结果为最终输出。
+### 何时用
 
-### 拓扑结构
+- 代理之间有明确的先后依赖（调研 → 写作 → 编辑），每一环的输入就是上一环的输出。
+- 不需要回环：把链路串直就行。
+
+### 边形状
+
+内建拓扑 `pipeline` 展开出的形状是一条链，两端接编排器：
 
 ```mermaid
 flowchart LR
@@ -41,131 +41,93 @@ flowchart LR
   agentA["Agent A"]
   agentB["Agent B"]
   agentC["Agent C"]
-
   parent --> agentA
   agentA --> agentB
   agentB --> agentC
   agentC -->|exit| parent
 ```
 
-### 边展开逻辑
+`parent` 是保留的编排器节点名，只出现在模板展开的边里——**命令式图没有隐式的 `parent` 节点**，编排工作流的就是调用工具的那个代理；链尾节点没有出边，它就是终点。
 
-每个 pipeline 在代码层面展开为 `(n+1)` 条边：`parent → agents[0]`，`agents[i] → agents[i+1]`（共 n-1 条），以及 `agents[last] → parent`（标记为 exit；`parent` 为协作图保留名，指编排器/父角色的固定节点）：
+### 最小步骤：用 graph_* 搭出来
 
-```typescript
-// src/graph/templates.ts:51-59
-function expandPipeline(agents: string[]): FlowEdge[] {
-  const edges: FlowEdge[] = [];
-  edges.push({ from: PARENT_NODE, to: agents[0] });
-  for (let i = 0; i < agents.length - 1; i++) {
-    edges.push({ from: agents[i], to: agents[i + 1] });
-  }
-  edges.push({ from: agents[agents.length - 1], to: PARENT_NODE, exit: true });
-  return edges;
-}
+```text
+graph_create   { "name": "pipeline" }                       → { "graph_id": "g-7f3a" }
+graph_add_node { "graph_id": "g-7f3a", "id": "coder",    "agent": "team--coder",    "prompt": "实现功能" }
+graph_add_node { "graph_id": "g-7f3a", "id": "reviewer", "agent": "team--reviewer", "prompt": "审查实现" }
+graph_add_node { "graph_id": "g-7f3a", "id": "tester",   "agent": "team--tester",   "prompt": "运行测试" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "coder",    "to": "reviewer" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "reviewer", "to": "tester" }
+graph_run      { "graph_id": "g-7f3a" }
+               → { "phase": "executing", "active_nodes": ["coder"], "pending_nodes": ["reviewer", "tester"] }
 ```
 
-### YAML 配置
+`type` 省略即为 `always`，依次接力。
 
-```yaml
-# role.yaml
-collaboration:
-  topology: pipeline
-  agents:
-    - coder
-    - reviewer
-    - tester
-  max_iterations: 1
-```
+### 常见错误
 
-路由器据此生成的指令序列为（`src/graph/prompt-builder.ts:131-159`）：
-1. 向 `coder` 派发初始任务
-2. 收集 `coder` 输出，派发给 `reviewer`
-3. 收集 `reviewer` 输出，派发给 `tester`
-4. `tester` 的输出为最终结果
-
----
+- **指望 `template: pipeline` 替你连边**：`template:` 只是声明元数据，引擎执行的是声明里的节点、边与循环组；不连边就没有流水线。
+- **给只有一条入边的节点写 `join`**：没有实际作用，汇聚只在多上游时才有意义。
+- **链尾又连回上游却不声明循环组**：那就是一个环，需要 `graph_add_loop` 覆盖；增量建图时只是警告，运行前的校验会升级为错误。
 
 ## Review-Loop（评审循环）
 
-Review-Loop 在 Pipeline 的基础上增加了一条**反馈边**：最后一个代理可以回环到第一个代理，形成迭代评审循环。
+### 何时用
 
-### 拓扑结构
+- 产出需要反复打磨：评审不通过就打回重做，直到通过为止。
+- 你愿意为「最多改几轮」设一个硬上限，而不是无限迭代。
+
+### 边形状
+
+内建拓扑 `review-loop` 在 Pipeline 的串行链上多两条尾部边：最后一个代理回到第一个代理的 `loop` 边，以及回到编排器的 `exit` 边。
 
 ```mermaid
 flowchart LR
   parent["Orchestrator (parent)"]
   agentA["Generator"]
   agentB["Reviewer"]
-
   parent --> agentA
   agentA --> agentB
   agentB -->|loop| agentA
   agentB -->|exit| parent
 ```
 
-### 边展开逻辑
+命令式版本用一条 **revise 回边**（`type: "on_signal"` 且 `signal_filter` 含 `revise_needed`）表达 `loop` 边：引擎沿它把已经完成的上游节点重新拉回就绪，形成返工。
 
-```typescript
-// src/graph/templates.ts:61-72
-function expandReviewLoop(agents: string[]): FlowEdge[] {
-  const edges: FlowEdge[] = [];
-  edges.push({ from: PARENT_NODE, to: agents[0] });
-  for (let i = 0; i < agents.length - 1; i++) {
-    edges.push({ from: agents[i], to: agents[i + 1] });
-  }
-  const lastAgent = agents[agents.length - 1];
-  const firstAgent = agents[0];
-  edges.push({ from: lastAgent, to: firstAgent, label: "loop" });
-  edges.push({ from: lastAgent, to: PARENT_NODE, label: "exit", exit: true });
-  return edges;
-}
+### 最小步骤：用 graph_* 搭出来
+
+```text
+graph_create   { "name": "review-loop" }                    → { "graph_id": "g-7f3a" }
+graph_add_node { "graph_id": "g-7f3a", "id": "writer", "agent": "team--writer", "prompt": "撰写初稿" }
+graph_add_node { "graph_id": "g-7f3a", "id": "critic", "agent": "team--critic", "prompt": "评审并给出修改意见" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "writer", "to": "critic" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "critic", "to": "writer",
+                 "type": "on_signal", "signal_filter": ["revise_needed"] }
+graph_add_loop { "graph_id": "g-7f3a", "id": "draft-review",
+                 "nodes": ["writer", "critic"], "max_traversals": 5 }
+graph_run      { "graph_id": "g-7f3a" }
 ```
 
-关键区别在于：
-- 新增一条 `agents[last] → agents[0]` 的反馈边，label 为 `"loop"`（`templates.ts:69`）
-- 同时保留 `agents[last] → parent` 的出口边，label 为 `"exit"`（`templates.ts:70`）
+`max_traversals` 是**硬性遍历上限**：触顶后 `revise_needed` 不再回环，成员节点升级为 `escalate`，并带上结构化载荷（退出原因、未解决项、已消耗的遍历次数）。
 
-### YAML 配置
+### 常见错误
 
-```yaml
-# role.yaml
-collaboration:
-  topology: review-loop
-  agents:
-    - writer
-    - critic
-  max_iterations: 5
-  termination:
-    any_of:
-      - max_iterations: 5
-      - converged: critic
-      - stuck:
-          repeats: 3
-```
-
-路由器在每次 `critic` 完成时判断输出质量：若质量达标则选择 exit 边结束流程；若需修订则选择 loop 边重新派发给 `writer`。迭代次数受 `max_iterations`（循环最大轮数上限，防止死循环）保护（`src/graph/collaboration-state.ts:127`）。
-
-### 循环检测
-
-Review-Loop 中的循环由 `src/graph/loop-detector.ts` 通过 Tarjan 强连通分量算法自动检测（`loop-detector.ts:13-75`）。一旦检测到循环而未设置 `max_iterations`，验证器会给出警告并默认设为 3（`src/graph/collaboration-validator.ts:178-190`）：
-
-```typescript
-// src/graph/collaboration-validator.ts:184-189
-if (!graph.maxIterations || graph.maxIterations <= 0) {
-  const msg =
-    "Cycle detected in graph but maxIterations is not set, defaulting to 3";
-  warnings.push(msg);
-}
-```
-
----
+- **把回边写成 `always`**：那不是返工，是纯 `always` 环——运行前的结构校验会直接报错，因为这样的环永远无法激活。
+- **忘了 `graph_add_loop`**：一条回边就构成环；增量建图时只是警告，运行前必然报错。
+- **把 `max_traversals` 当软提示**：它是硬上限，触顶即升级，不会再多跑一轮。
+- **用 `mode: "fresh"` 追求逐轮隔离**：不支持，会返回显式错误；要隔离就每个回合另建一张图。
+- **回边的 `signal_filter` 拼错**：列表里没有 `revise_needed` 的边不会被 revise 传播激活，返工永远不会发生。
 
 ## Star（星形）
 
-Star 拓扑中，Orchestrator 依次向每个代理派发工作，所有代理独立处理，各自将结果返回给 Orchestrator。
+### 何时用
 
-### 拓扑结构
+- 若干子任务互不依赖，可以完全并行：前端分析、后端分析、数据层分析各做各的。
+- 需要汇总时，再补一个汇聚节点。
+
+### 边形状
+
+内建拓扑 `star` 给每个代理两条边：编排器派发它（`parent → agent`），它完成后回到编排器（`agent → parent`，带 `exit`）。
 
 ```mermaid
 flowchart LR
@@ -173,7 +135,6 @@ flowchart LR
   agentA["Agent A"]
   agentB["Agent B"]
   agentC["Agent C"]
-
   parent --> agentA
   parent --> agentB
   parent --> agentC
@@ -182,43 +143,60 @@ flowchart LR
   agentC -->|exit| parent
 ```
 
-### 边展开逻辑
+命令式版本有**两种写法**：各自独立（不加任何边，全部是根节点），或显式汇聚（补一个扇入节点）。
 
-每个代理有两条边：`parent → agent` 和 `agent → parent`（exit）：
+### 最小步骤：用 graph_* 搭出来
 
-```typescript
-// src/graph/templates.ts:74-81
-function expandStar(agents: string[]): FlowEdge[] {
-  const edges: FlowEdge[] = [];
-  for (const agent of agents) {
-    edges.push({ from: PARENT_NODE, to: agent });
-    edges.push({ from: agent, to: PARENT_NODE, exit: true });
-  }
-  return edges;
-}
+写法 A —— 各自独立：
+
+```text
+graph_create   { "name": "star-fanout" }                    → { "graph_id": "g-7f3a" }
+graph_add_node { "graph_id": "g-7f3a", "id": "frontend", "agent": "team--frontend", "prompt": "分析前端" }
+graph_add_node { "graph_id": "g-7f3a", "id": "backend",  "agent": "team--backend",  "prompt": "分析后端" }
+graph_add_node { "graph_id": "g-7f3a", "id": "data",     "agent": "team--data",     "prompt": "分析数据层" }
+graph_run      { "graph_id": "g-7f3a" }
+               → { "phase": "executing", "active_nodes": ["frontend", "backend", "data"], "pending_nodes": [] }
 ```
 
-### YAML 配置
+没有任何入边的节点都是根，`graph_run` 会一次性把它们全部派发。
 
-```yaml
-# role.yaml
-collaboration:
-  topology: star
-  agents:
-    - researcher
-    - designer
-    - writer
+写法 B —— 显式汇聚：
+
+```mermaid
+flowchart LR
+  frontend["frontend"] --> merge["merge (join: all)"]
+  backend["backend"] --> merge
+  data["data"] --> merge
 ```
 
-> **V1 限制**：虽然拓扑概念上是并行的，当前路由器按顺序分批派发，即每次只派发一个代理（`src/graph/prompt-builder.ts:213-214`）。
+```text
+graph_add_node { "graph_id": "g-7f3a", "id": "merge", "agent": "team--lead",
+                 "prompt": "汇总三份分析", "join": { "strategy": "all" } }
+graph_add_edge { "graph_id": "g-7f3a", "from": "frontend", "to": "merge" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "backend",  "to": "merge" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "data",     "to": "merge" }
+graph_run      { "graph_id": "g-7f3a" }
+```
 
----
+省略 `join` 等价于 `all`；`any` 是任一上游应答即开始；`quorum` 要额外给 `quorum` 计数，且不得超过该节点的入度。
 
-## Custom（自定义拓扑）
+### 常见错误
 
-当内建拓扑无法满足需求时，可以使用 `flow` 字段显式定义任意有向边，`topology` 字段省略或留空。
+- **以为有隐式汇总节点**：命令式图没有 `parent`，不显式声明 `merge` 就没人汇总。
+- **汇聚节点用了 `quorum` 但计数大于入度**：这是永远无法满足的 join，会被校验拒绝。
+- **所有节点都有入边**：图里没有根节点，`graph_run` 没有可派发的起始节点（校验会就此给出「可能死锁」的警告）。
+- **分支之间偷偷加了边**：那就不是 Star 了；分支互相依赖时改用 Pipeline 或自定义 DAG。
 
-### 多入口 / 多出口示例
+## 自定义拓扑（Custom）
+
+### 何时用
+
+- 三个内建形状覆盖不了：多入口汇合、菱形 DAG、按条件分叉、一个节点等两个不同上游。
+- 你愿意自己决定每一条边，并用 `join` / `on_condition` 表达汇聚与分叉。
+
+### 边形状
+
+多入口汇合成一条管线：
 
 ```mermaid
 flowchart LR
@@ -227,7 +205,6 @@ flowchart LR
   parser["Parser"]
   analyzer["Analyzer"]
   reporter["Reporter"]
-
   parent --> scanner
   parent --> parser
   scanner --> analyzer
@@ -236,156 +213,35 @@ flowchart LR
   reporter -->|exit| parent
 ```
 
-### YAML 配置
+### 最小步骤：用 graph_* 搭出来
 
-```yaml
-# role.yaml
-collaboration:
-  flow:
-    - from: parent
-      to: scanner
-    - from: parent
-      to: parser
-    - from: scanner
-      to: analyzer
-    - from: parser
-      to: analyzer
-    - from: analyzer
-      to: reporter
-    - from: reporter
-      to: parent
-      exit: true
+```text
+graph_create   { "name": "scan-pipeline" }                  → { "graph_id": "g-7f3a" }
+graph_add_node { "graph_id": "g-7f3a", "id": "scanner",  "agent": "team--scanner",  "prompt": "扫描输入" }
+graph_add_node { "graph_id": "g-7f3a", "id": "parser",   "agent": "team--parser",   "prompt": "解析结构" }
+graph_add_node { "graph_id": "g-7f3a", "id": "analyzer", "agent": "team--analyzer", "prompt": "合并分析",
+                 "join": { "strategy": "all" } }
+graph_add_node { "graph_id": "g-7f3a", "id": "publish",  "agent": "team--lead",     "prompt": "按条件决定是否发布" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "scanner",  "to": "analyzer" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "parser",   "to": "analyzer" }
+graph_add_edge { "graph_id": "g-7f3a", "from": "analyzer", "to": "publish",
+                 "type": "on_condition", "condition": "artifact_exists(report.md)" }
+graph_run      { "graph_id": "g-7f3a" }
 ```
 
-自定义拓扑的边使用 `src/graph/edge-parser.ts` 解析（`edge-parser.ts:14-39`），支持字符串语法和对象语法两种形式：
+`on_condition` 的 `condition` 必须是已注册的条件名（`artifact_exists(report.md)` 这样的 `name(arg)` 形式），未注册的名字会被结构校验拒绝。自定义拓扑也可以整包注册给声明式图文档使用：`graph_topologies` 扩展点接受一个「代理列表 → 边集」的展开函数，见[扩展机制](/03-Reference/extensions)。
 
-```yaml
-# 字符串语法（edge-parser.ts:45-63）
-flow:
-  - "scanner -> analyzer"
-  - "analyzer -> reporter: handoff"
+### 常见错误
 
-# 对象语法（edge-parser.ts:68-85）
-flow:
-  - from: scanner
-    to: analyzer
-    label: "merge results"
-```
+- **`on_condition` 用了未注册的条件名**：写入时就被拒绝；空 `condition` 同样被拒绝。
+- **边引用了未声明的节点**：`from` / `to` 必须指向已注册的节点 id。
+- **忘了给汇聚节点写 `join`**：省略即 `all`，这通常是对的；但如果你要的是「任一上游先到就开工」，必须显式写 `any`。
+- **以为必须一次把图建完**：每一步写入都是先校验再落库，所以「先加闭合环的边、再声明循环组」是允许的（此时未覆盖的环只算警告），反过来也同样安全。
 
----
+## 备注
 
-## Hybrid（混合模式）
+> 自 v1.8.0 起，声明式多代理工作流词汇表已整体移除；这些模式只能用命令式 `graph_*` 工具搭建。
 
-Hybrid 模式将模板展开的边与自定义 `flow` 边合并，`flow` 中的边会覆盖同名的模板边（`src/graph/edge-parser.ts:92-109`）：
-
-```yaml
-# role.yaml — pipeline 模板 + flow 覆盖
-collaboration:
-  topology: pipeline
-  agents:
-    - collector
-    - validator
-    - formatter
-  flow:
-    # 在 collector → validator 之间插入标签
-    - from: collector
-      to: validator
-      label: "validation"
-    # 添加一条 validator 到 parent 的额外退出路径
-    - from: validator
-      to: parent
-      exit: true
-```
-
-合并逻辑使用 `from→to` 字符串作为键（`edge-parser.ts:99`），模板先加入 map，flow 后加入，因此 flow 中的同键边可以覆盖模板边：
-
-```typescript
-// src/graph/edge-parser.ts:96-108
-function mergeEdges(templateEdges: FlowEdge[], flowEdges: FlowEdge[]): FlowEdge[] {
-  const edgeMap = new Map<string, FlowEdge>();
-  for (const edge of templateEdges) {
-    const key = `${edge.from}->${edge.to}`;
-    edgeMap.set(key, edge);
-  }
-  for (const edge of flowEdges) {
-    const key = `${edge.from}->${edge.to}`;
-    edgeMap.set(key, edge);
-  }
-  return Array.from(edgeMap.values());
-}
-```
-
-### 混合模式的结构图
-
-```mermaid
-flowchart LR
-  parent["Orchestrator (parent)"]
-  collector["Collector"]
-  validator["Validator"]
-  formatter["Formatter"]
-
-  parent --> collector
-  collector -->|validation| validator
-  validator -->|overridden custom label| formatter
-  validator -->|extra exit| parent
-  formatter -->|exit| parent
-```
-
----
-
-## 路由器如何分发
-
-路由器收到协作图后，`src/graph/collaboration-state.ts` 中的 `GraphSessionState` 管理执行状态（`collaboration-state.ts:75-172`），包括：
-
-- **Frontier**（前沿）：当前可被派发的代理集合
-- **Completed**（已完列表）：已完成的代理列表
-- **Iteration counter**（迭代计数器）：记录循环迭代次数
-
-当路由器 `dispatch` 到某代理后，`advanceGraphForDispatch`（`src/graph/collaboration-advance.ts:97-155`）推进状态：从 frontier 移除该代理，将后继节点加入 frontier，检查 `exit` 边判断是否终止。
-
-### 自定义拓扑注册
-
-开发者可以通过 `registerTopology` API（应用程序接口，Application Programming Interface）注册运行时自定义拓扑（`src/graph/templates.ts:14-22`）：
-
-```typescript
-// src/graph/templates.ts:14-22
-export function registerTopology(
-  name: string,
-  expander: (agents: string[]) => FlowEdge[],
-): void {
-  customTopologies.set(name, expander);
-}
-```
-
-同时需要在 `src/constants.ts` 中注册模板名称（`constants.ts:64-66`）：
-
-```typescript
-// src/constants.ts:64-66
-export function addGraphTemplateValue(name: string): void {
-  GRAPH_TEMPLATE_VALUES.add(name);
-}
-```
-
----
-
-## 验证规则
-
-`src/graph/collaboration-validator.ts` 对所有拓扑统一执行 7 项检查（`collaboration-validator.ts:34-55`）：
-
-| # | 检查项 | 说明 |
-|---|--------|------|
-| 1 | 节点存在性 | 边中引用的所有节点必须在可用代理列表中 |
-| 2 | 出口边存在 | 至少有一条 exit 边 |
-| 3 | 入口点存在 | 至少有一条来自 `parent` 的边 |
-| 4 | 孤立代理（警告） | 可用但未被任何边引用的代理 |
-| 5 | 连通性（警告） | 所有节点必须从 `parent` 可达 |
-| 6 | 循环检测 | 有环时不设 `max_iterations` 则默认 3 |
-| 7 | 终止条件 | `converged` 和 `result_matches.agent` 引用已知代理 |
-
-## 下一步
-
-- [运行时行为](/04-Advanced/runtime-behavior) — 图状态管理与 FSM 生命周期
-- [终止条件](/04-Advanced/termination-conditions) — continue_until 条件与收敛检测
-- [协作图](/02-Guide/collaboration-graph) — 内置拓扑与自定义流配置
-
----
+- 三个内建拓扑的**展开规则**（`parent` 的含义、每种拓扑生成哪些边、自定义拓扑如何通过 `graph_topologies` 扩展点注册）见[图声明参考](/04-Advanced/graph-declaration)；本页只回答「该选哪个、怎么搭」。
+- 工具逐个怎么用见[图工作流](/02-Guide/graph-workflows)；节点的状态机、join 评估与信号传播见[图执行引擎](/04-Advanced/graph-engine)与[运行时行为](/04-Advanced/runtime-behavior)。
+- 若你的角色仍带着已移除的声明式协作配置块，逐条迁移对照见[迁移对照](/06-Appendix/migration)。

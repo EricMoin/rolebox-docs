@@ -1,334 +1,173 @@
 ---
-title: 会话工具
-description: 10 工具会话管理套件 — 会话列表/读取/搜索/分析/导出/标签/续期/时间线与链接工具
+title: 会话工具实现
+description: rolebox 六个会话内省工具的内部实现 — ISessionClient 端口、类型模型、ID 语义、与持久化的关系
 ---
 
-# 会话工具
+# 会话工具（Session Tools）
 
-> **v0.17.0 引入** — 10 工具会话管理套件（4 个兼容 omo + 6 个独有），覆盖列表/读取/搜索/分析/导出/标签/续期/时间线/链接（CHANGELOG.md:198）
+六个会话工具让代理读取 harness 里的历史会话：列出、读取、搜索、取详情、看文件变更、分叉。
+本页讲它们的实现——端口抽象、类型模型、ID 语义、与持久化的边界，以及每个工具在内部做了什么。
 
+> **本页边界**：六个工具的**参数与返回格式**见[会话与记忆工具](/03-Reference/tools/session-memory-tools)；用它们做记忆合并的完整流程见[记忆系统](/04-Advanced/memory-system)与[教程 07 让代理记住你](/02-Guide/tutorial/07-memory)；调度任务的按时间桶查询属于 dispatch 域，见[编排工具](/03-Reference/tools/orchestration-tools)。
 
-> **相关文档：** [记忆系统](/04-Advanced/memory-system) — 跨会话持久记忆 | [CLI 参考](/03-Reference/cli) — 命令行管理 | [调度配置](/03-Reference/dispatch-config) — 并发与预算
+## 子系统结构
 
-rolebox 提供了一套完整的会话管理工具套件，共 10 个工具，让代理能够列出、读取、搜索、分析、导出、标记和管理会话。其中 4 个工具与 oh-my-openagent (omo) 兼容，6 个工具为 rolebox 独有。
+会话工具是**只读适配层**：角色不拥有会话存储，只通过一个端口读取 harness 持有的会话日志。
 
-::: tip omo 兼容说明
-4 个工具（`session_list`、`session_read`、`session_search`、`session_info`）与 oh-my-openagent 同名且接口兼容，但功能更强。如果同时使用 omo 和 rolebox，rolebox 的版本会自动覆盖 omo 的工具——这是一个安全的覆盖，因为 rolebox 版本向后兼容 omo 的输入格式。其余 6 个工具为 rolebox 独有，不会产生冲突。
-:::
+端口是 `ISessionClient`（`src/platform/ports/session-client.ts`），它把平台差异收敛成一组方法：`list` / `get` / `messages` / `children` / `todo` / `diff` / `fork` / `status` / `prompt` / `promptSync` / `create` / `abort`，加上可选的 `compact`。端口自己不做任何 I/O，也不允许 import 具体平台的 SDK。
 
-## 工具总览
+三个 harness 各自提供实现：`src/platform/adapters/opencode/session.ts`、`src/platform/adapters/pi/session.ts`、`src/platform/adapters/dsh/session.ts`。`src/session/client.ts` 保留了一个向后兼容别名，把旧的 `SessionClientWrapper` 指到 OpenCode 适配器上；新代码应当直接用端口类型。
 
-| 工具 | 类型 | 功能描述 |
-|------|------|----------|
-| `session_list` | 兼容增强 | 列出所有会话，支持按日期范围、项目路径、代理名称筛选。显示 token 消耗、成本、模型信息 |
-| `session_read` | 兼容增强 | 读取会话完整记录，支持消息类型筛选、分页、工具调用展开 |
-| `session_search` | 兼容增强 | 跨会话全文搜索，支持上下文窗口显示匹配位置 |
-| `session_info` | 兼容增强 | 查看会话详细元数据：token 分解、成本、工具频率、模型分布 |
-| `session_analytics` | 🆕 独有 | 分析仪表盘 — token 趋势、工具调用分布、按日/周/模型/代理分组统计 |
-| `session_export` | 🆕 独有 | 将会话导出为 Markdown 或 JSON 文件，支持离线查看与分享 |
-| `session_tag` | 🆕 独有 | 为会话添加/移除标签，便于分类和检索 |
-| `session_resume` | 🆕 独有 | 从已有会话恢复上下文，创建延续会话 |
-| `session_timeline` | 🆕 独有 | 按时间线汇总会话活动，可视化工作模式 |
-| `session_link` | 🆕 独有 | 关联调度任务与会话，桥接 dispatch 和 session 两个系统域 |
+注册发生在共享装配层：`src/platform/tool-assembly.ts` 的 `buildCanonicalTools()` 只有在调用方传入 `sessionClient` 时才注册这六个工具，否则整个会话工具面不存在。三个平台都会传入自己的适配器，因此在 v1.9.0 上会话工具对三者都可用。
 
-## 最常用工具使用示例
-
-### `session_list` — 列出会话
-
-```
-session_list(limit=10, from_date="2026-07-01")
+```text
+6 个工具 → src/session/session-browse-tools.ts   session_list / session_search
+         → src/session/session-inspect-tools.ts  session_read / session_info / session_diff / session_fork
+         → src/session/tools.ts                  统一再导出
 ```
 
-返回表格：
+## 类型模型
 
-```
-| Session ID | Title | Agent | Model | Msgs | Created | Updated | Tokens In | Tokens Out | Cost |
-```
+工具之间传递的是 `src/session/types.ts` 里的结构，而不是各平台的原生对象：
 
-可选 `include_archived: true` 包含已归档会话，`include_message_count: true` 获取消息数量。
+| 类型 | 关键字段 | 用途 |
+|------|----------|------|
+| `SessionInfo` | `id` / `projectID` / `directory` / `parentID?` / `title` / `version` / `time{created,updated,compacting?}` / `summary?` | 会话元数据；`summary.diffs` 存在时附带文件变更概览 |
+| `Message` | `info: MessageInfo` + `parts: Part[]` | 一条消息与其所有片段 |
+| `Part` | `text` / `reasoning` / `tool` / `step-finish` 四种，其余按通用片段保留 | 渲染与搜索的输入 |
+| `ToolPart.state` | `pending` / `running` / `completed` / `error` 四态 | 工具调用在会话中的落点 |
+| `FileDiff` | `file` / `before` / `after` / `additions` / `deletions` | `session_diff` 与统计的输入 |
+| `SessionStats` | token 分项、成本、工具频次、模型分布、增删行数 | `session_info` 的聚合结果 |
+| `SearchMatch` | 会话、消息、角色、命中文本与前后文 | `session_search` 的结果单元 |
+| `SessionStatus` | `idle` / `retry{attempt,message,next}` / `busy` | `session_info` 的 `Status` 行 |
+| `Todo` | `content` / `status` / `priority` / `id` | 待办进度（不在会话日志里，单独查询） |
 
-### `session_read` — 读取会话
+`MessageInfo.role` 的类型是 `"user" | "assistant" | (string & {})`：适配器特有的角色（例如 Pi 的 `toolResult`）被原样保留，避免工具输出被误判成助手正文。
 
-```
-session_read(session_id="abc123", message_type="assistant", limit=50)
-```
+## ID 语义
 
-支持四种消息类型筛选：`user`、`assistant`、`tool`、`all`。工具调用结果会自动展开（截断至 2000 字符）。
+会话 ID 由 harness 生成，rolebox 全程透传，不铸造也不改写：
 
-### `session_search` — 搜索会话
+- `session_list` 输出的 ID 就是后续 `session_read` / `session_info` / `session_diff` / `session_fork` 要回填的值；
+- `parentID` 表达父子关系（分叉与子会话）；`session_fork` 成功后返回一个全新的 ID，新旧会话此后独立演进；
+- `message_id` 是会话**内部**的消息标识，只被 `session_diff`（取该消息之前的差异）与 `session_fork`（在该消息处分叉）使用。
 
-```
-session_search(query="数据库迁移策略", case_sensitive=false)
-```
+历史上有一个坑：`shortId()`（`src/session/tool-helpers.ts`）会把超过 12 字符的 ID 截成 `xxxxxxxxxxxx...`，它曾被用在会话表格的 ID 列上，导致表格里的 ID 无法回填。v1.8.0 起会话列表与搜索结果表改为输出完整 ID。
 
-跨会话全文搜索，返回匹配行及上下文（±2 条消息）。
+`shortId()` 目前只剩两处展示性用途：`session_read` 遇到没有消息的会话时提示里的 ID，以及 `session_fork` 成功块里「在哪个消息处分叉」那一行的消息引用。两者都不承担回填职责。
 
-### `session_info` — 会话详情
+## 六个工具的实现要点
 
-```
-session_info(session_id="abc123", include_todos=true)
-```
+### session_list
 
-返回完整元数据：token 消耗分解、成本计算、文件变更列表、子会话表格、待办事项完成统计。
+先按 `project_path`（缺省取工具上下文的 `directory`）调用 `client.list()`，再用 `from_date` / `to_date` 按 `time.created` 过滤——日期解析失败（`NaN`）时该过滤器被静默忽略，不报错。之后按 `time.updated` 倒序、按 `limit` 截断，最后对每个入选会话再调一次 `client.messages()` 数消息条数，交给 `formatSessionListTable` 渲染。
 
-### `session_export` — 导出会话
+这里有一个值得注意的成本特征：**消息数是逐会话读取后统计的**，所以列出 20 个会话会产生一次列表查询加 20 次消息查询。
 
-```
-session_export(session_id="abc123", format="markdown", output_path="exports/session.md")
-```
+表格的固定表头是：
 
-支持 `markdown` 和 `json` 两种格式。提供 `output_path` 时写入文件（原子写入：先写 `.tmp` 再 `rename`），不提供时返回内联字符串。
-
-### `session_resume` — 恢复会话
-
-```
-session_resume(session_id="abc123", agent="code-reviewer")
+```text
+| Session ID | Title | Messages | Date Range | Duration |
 ```
 
-从源会话提取最后 3 条助手消息作为上下文，创建延续会话并返回新的会话 ID。
+行内容随环境变化。列表为空时返回 `No sessions found.`。
 
-### `session_link` — 关联任务与会话
+### session_search
 
-```
-session_link(task_id="task-001", session_id="abc123")
-```
+搜索是**纯子串匹配**，不是模糊检索：默认大小写不敏感，逐条消息比对。参与匹配的文本默认只有非 `ignored` 的 text 片段；打开 `include_tool_output` 后，状态为 `completed` 的工具输出也进入匹配（`error` / `pending` 状态的输出不参与）。
 
-持久化存储在 `.rolebox/state/session-links.json`。支持三种操作模式：添加链接、查询链接、列出全部链接。
+命中的片段用 80 字符窗口取前后文（各截到窗口一半再加省略号）。搜索范围有硬上限：跨会话搜索最多扫描 200 个会话，命中数达到 `limit` 就提前停止。若因为上限而被截断，结果末尾会追加一行 `(searched first 200 sessions only)`；若在截断范围内一条都没命中，则直接返回「前 200 个会话中没有匹配」的提示，而不是空结果。
 
-## 标签系统
+markdown 输出最多展示 20 条命中，多出的部分折叠成一行计数提示；`format: "json"` 则返回完整的匹配数组。
 
-`session_tag` 工具使用 opencode 内建的会话 `metadata` 字段（键 `rolebox_tags`），无需额外持久化文件：
+### session_read
 
-```
-session_tag(session_id="abc123", tags=["重要", "待复习"])    # 添加标签
-session_tag(session_id="abc123", list=true)                  # 查看标签
-session_tag(session_id="abc123", remove=["待复习"])          # 移除标签
-```
+`client.get()` 先确认会话存在，不存在返回 `Session not found: <id>`；没有消息时返回 `Session "<title>" (<shortId>) has no messages.`。之后拉取消息并按 `offset` 切片，拼接一段头部（标题、完整 ID、创建/更新时间、时长），再交给 `formatMessages`。
 
-## 分析仪表盘
+过滤发生在**渲染阶段**而不是取数阶段：`role_filter` 与 `tool_filter` 在遍历消息时跳过不匹配的项。每条 text 片段截断到 500 字符；reasoning 片段只在打开 `include_thinking` 时输出；工具输出只在打开 `include_tool_results` 时附在工具行之后。消息编号用 `offset + 序号` 还原成会话内的绝对序号，所以分页读取时编号是连续的。`include_todos` 打开时在末尾追加一节待办清单。
 
-虽然 `session_analytics` 作为独立工具正在规划中，但当前可通过 `session_info`（别名 `session_inspect`）获取完整的分析仪表盘输出。该工具提供与 `session_analytics` 相同的 `collectSessionAnalytics` 数据源。
+### session_info
 
-输出示例：
+一次 `collectSessionAnalytics()`（`src/session/tool-helpers.ts`）走完所有数据：拉消息、子会话、待办、文件差异与会话状态，遍历消息累加助手消息的 token 与成本（input / output / reasoning / cache read / cache write）并按 `provider/model` 计数，同时统计所有消息里 `tool` 片段的调用频次，最后把文件差异的增删行数累加。
 
-```
-### Token Usage
-  Input:     45,231
-  Output:    12,847
-  Reasoning: 3,210
-  Cache read:   8,400
-  Cache write:  2,100
+渲染顺序固定：会话元数据（存在父会话时输出 `Parent Session`，存在 `summary.diffs` 时输出 `Summary`）、`Messages` / `Children` / `Status` 三行、`### Token Usage`、总成本、`### Models Used`（按模型名排序）、`### Tool Usage`（按调用次数降序）、`### File Changes`（有差异时才输出）、`### Todo Progress`（有待办时才输出）。
 
-Total Cost: $0.002345
+### session_diff
 
-### Models Used
-  openai/gpt-4o: 12 messages
-  openai/gpt-4o-mini: 3 messages
+只调一次 `client.diff(session_id, { messageID })`，把结果交给 `formatDiff`：先输出 `Files changed` / `Additions` / `Deletions` 三行汇总，再对每个文件输出 `--- a/<path>` 与 `+++ b/<path>`，随后是本文件的差异体。
 
-### Tool Usage
-  session_list: 8 calls
-  memory_write: 5 calls
-  bash: 12 calls
-  dispatch: 3 calls
+**实现细节**：差异体不是 LCS 或 Myers 对齐，而是**按行号位置**逐行比较 `before` 与 `after`——第 i 行不同就输出一行 `-` 与一行 `+`，相同则输出一行前导空格的上下文行。因此插入或删除整行时，后续所有行都会被报告为「删除 + 新增」。它给出的是可读的变更对照，不是可 `patch` 应用的标准 diff。
 
-### File Changes
-  Files modified: 4
-  Additions: 120
-  Deletions: 45
-```
+无变更时返回 `No file changes in this session.`。要比较两个会话，需要分别取差异后自行对照——这个工具的参数里没有第二个会话 ID。
 
-`session_info` 的 `include_todos=true` 参数还会生成待办事项完成统计，帮助评估会话进度。
+### session_fork
 
-::: tip 使用场景
-在长时间会话结束时查看 `session_info`，评估 token 消耗是否合理、哪些工具被高频调用、文件变更范围是否符合预期。
-:::
+先 `client.get()` 证明会话存在，再 `client.fork(session_id, { messageID })`。省略 `message_id` 时在最新消息处分叉。失败被明确分成两种文案：给了 `message_id` 时说明会话存在、分叉被拒可能源于无效的消息 ID；没给时只说分叉被拒，不提消息 ID，也不再声称会话「可能不存在」——这是 v1.8.0 修正的措辞。
 
-## 调度时间线
+成功时返回 `## Session Forked Successfully` 块，列出原会话与新会话的**完整** ID、新会话创建时间、分叉点，并提示新会话只是分叉点之前的副本。
 
-按时间维度汇总调度任务活动的工具是 `task_chronology`（位于 dispatch 域，非 session 域）。`session_timeline` 工具正在规划中，当前推荐使用 `task_chronology`：
+## 与持久化的关系
 
-```
-task_chronology(from_date="2026-07-01", to_date="2026-07-20", group_by="day")
+会话日志的所有权在 harness，不在 rolebox：
+
+- 六个工具读到的每一个字节都经过 `ISessionClient`，rolebox 侧没有会话数据库，也不写 harness 的会话日志；
+- `session_fork` 是唯一会**创建**状态的操作，而创建的仍是 harness 的会话，rolebox 只是转发；
+- rolebox 自己的持久化只落在工作区目录：记忆库是 `.rolebox/memory.db`，函数运行时与信号台账等状态在 `.rolebox/state/` 下按工作区哈希命名。
+
+这条边界解释了一个常见困惑：会话工具的可见范围就是当前 harness 与当前工作区。换一个工作区目录、换一个 harness，看到的是另一批会话。
+
+## 典型工作流
+
+### 定位并检查一个会话
+
+```text
+session_list(from_date="2026-07-01", to_date="2026-07-15", limit=50)
+session_info(session_id="ses_abc123")
+session_read(session_id="ses_abc123", include_tool_results=true, limit=50)
 ```
 
-输出示例：
+先按日期收敛候选，用详情页判断这条会话值不值得细读（token、成本、工具分布、文件变更），再带工具输出读取正文。要读很长会话时用 `limit` + `offset` 分段，编号会保持连续。
 
-```
-## Task Chronology
+### 搜索、分叉、对照
 
-Grouped by: day
-Range: 2026-07-01 to 2026-07-20
-
-| Bucket | Count | Pending | Running | Completed | Awaiting_approval | Error | Cancelled | Timeout |
-|--------|-------|---------|---------|-----------|-------------------|-------|-----------|---------|
-| 2026-07-15 | 5 | 0 | 0 | 4 | 1 | 0 | 0 | 0 |
-| 2026-07-16 | 12 | 0 | 0 | 10 | 2 | 0 | 0 | 0 |
-| 2026-07-17 | 8 | 0 | 1 | 6 | 0 | 1 | 0 | 0 |
+```text
+session_search(query="数据库连接超时", limit=10)
+session_fork(session_id="ses_abc123", message_id="msg_456")
+session_diff(session_id="ses_abc123")
 ```
 
-支持三种分组方式：`hour`（按小时）、`day`（按天）、`agent`（按代理名称）。可用于分析工作节奏、检测异常堆积或评估不同代理的负载分布。
+搜索给出命中所在的会话与消息；分叉在感兴趣的分叉点复制出一条新会话；`session_diff` 用来看某一条会话内部改动了哪些文件。分叉之后两侧独立演进，各自的差异要分别查询。
 
-::: tip 为什么 task_chronology 在 dispatch 域而非 session 域？
-会话活动（消息、token）属于 session 域；调度任务的生命周期（触发、完成、错误）属于 dispatch 域。`task_chronology` 追踪的是 dispatch 任务的时间线，而非消息时间线。
-:::
-
-## 会话分析 Recipes
-
-以下是一组常用会话分析模式，帮助你在实际工作流中高效利用会话工具套件。
-
-### 按日期查找会话
-
-当需要回顾某一天或某一周的工作时，使用 `session_list` 的日期过滤参数：
-
-```
-session_list(from_date="2026-07-01", to_date="2026-07-10", limit=50)
-```
-
-返回该日期范围内的所有会话。结合 `session_info` 可以快速了解当天的工作量：
-
-```
-session_info(session_id="abc123")
-```
-
-也可以跨项目搜索：
-
-```
-session_list(from_date="2026-07-01", project_path="/path/to/other-project")
-```
-
-::: tip 日期范围技巧
-- 查今天：`from_date="$(date +%F)"`
-- 查本周一至今：`from_date="2026-07-13"`（手动填入周一日期）
-- 指定精确时间：ISO 8601 格式如 `2026-07-15T09:00:00` 同样支持
-:::
-
-### 对比两个会话
-
-当你需要比较两次不同实现尝试的结果时，使用 `session_diff` 工具对比会话之间的差异：
-
-```
-session_diff(session_id="abc123", other_session_id="def456")
-```
-
-输出会显示两次会话在文件变更、token 消耗、工具调用分布等方面的对比：
-
-```
-## Session Diff: abc123 vs def456
-
-### File Changes
-  abc123: 4 files modified (+120 / -45)
-  def456: 7 files modified (+230 / -89)
-
-### Token Usage
-  abc123: Input 45,231 | Output 12,847
-  def456: Input 78,902 | Output 23,456
-
-### Tool Call Distribution
-  abc123: bash(12) memory_write(5) dispatch(3)
-  def456: bash(20) memory_write(8) session_search(4)
-```
-
-这在评估不同方案的工作量和效果时非常有用。若需查看具体消息内容的差异，可以配合 `session_read` 分别读取两个会话的完整记录手动比较。
-
-### Fork 会话用于探索
-
-当你有以下需求时，使用 `session_fork` 将会话分叉：
-
-- 想在一个已完成会话的基础上尝试不同方向
-- 需要保留原有会话的完整性作为基准线
-- 对比两种不同策略的结果
-
-```
-session_fork(session_id="abc123")
-```
-
-分叉会创建一个新会话，继承原会话的历史消息（最后 N 条助手消息）作为上下文起点。新会话拥有独立的 ID，与原会话互不影响：
-
-```
-Forked session created.
-  Source: abc123
-  Forked: xyz789
-```
-
-之后可以在分叉会话中自由探索，而不影响原始会话的完整性。
-
-### 完整的工作流示例
-
-一个典型的问题诊断工作流：
-
-```
-# 1. 按日期定位相关会话
-session_list(from_date="2026-07-13", to_date="2026-07-15")
-
-# 2. 深入读取关键会话的详情
-session_info(session_id="abc123", include_todos=true)
-session_read(session_id="abc123", include_tool_results=true)
-
-# 3. 搜索相关关键词确认问题范围
-session_search(query="数据库连接超时")
-
-# 4. Fork 一个隔离的调试会话
-session_fork(session_id="abc123")
-
-# 5. 在分叉会话中尝试修复，完成后导出
-session_export(session_id="xyz789", format="markdown", output_path="exports/debug-session.md")
-
-# 6. 与原始会话对比验证差异
-session_diff(session_id="abc123", other_session_id="xyz789")
-```
-
-::: tip 使用 `session_resume` 还是 `session_fork`？
-- 需要**延续**未完成的工作 → 使用 `session_resume`（创建子会话）
-- 想要**复制上下文**用于探索性工作 → 使用 `session_fork`（创建独立副本）
-- `session_resume` 保持父子关系（新会话以旧会话为父），`session_fork` 创建独立的平行副本
-:::
-
-## 常见问题排查
+## 排错
 
 ### 会话未找到
 
-```
-session_info(session_id="abc123")
-# 返回: Session not found: abc123
-```
+`Session not found: <id>` 只会来自 `session_read` / `session_info` / `session_fork` 的前置检查。三种常见原因：ID 拼写或复制不全（用 `session_list` 重新取完整 ID）；会话属于另一个项目目录——`session_list` 默认按当前目录过滤，指定 `project_path` 才能跨项目；会话已被清理或过期。
 
-可能原因：
+### 搜索无结果
 
-- 会话 ID 拼写错误 — 用 `session_list` 确认有效的会话 ID
-- 会话属于其他项目目录 — `session_list` 默认按当前项目过滤，指定 `project_path` 参数可跨项目搜索
-- 会话已被清理或过期
+`session_search` 是子串匹配：查询词必须真的出现在消息文本里。默认不搜工具输出，打开 `include_tool_output` 才覆盖；跨会话搜索只扫前 200 个会话，命不中时先用 `session_id` 把范围收窄到单条会话再搜。
 
-### 导出路径权限被拒绝
+### 差异或统计为空
 
-```
-session_export(session_id="abc123", format="markdown", output_path="/root/exports/session.md")
-```
+`session_diff` 返回 `No file changes in this session.` 说明这条会话没有文件变更，或 `message_id` 过滤掉了它们。`session_info` 的 token 与成本全为零，通常意味着适配器没有提供这层元数据，或该会话的助手消息没有附带 token 统计——这不影响消息数、工具频次与文件变更等其他分项。
 
-如果输出路径不可写，工具会静默回退到返回内联字符串。请在导出前确认目标目录存在且可写。建议使用项目内路径，如 `exports/session.md`。
+## 实现模块
 
-### 标签未显示
+| 模块 | 职责 |
+|------|------|
+| `src/platform/ports/session-client.ts` | `ISessionClient` 端口定义 |
+| `src/platform/adapters/opencode/session.ts` | OpenCode 适配器（旧名 `SessionClientWrapper`） |
+| `src/platform/adapters/pi/session.ts` | Pi 适配器 |
+| `src/platform/adapters/dsh/session.ts` | dsh 适配器 |
+| `src/session/session-browse-tools.ts` | `session_list` 与 `session_search` |
+| `src/session/session-inspect-tools.ts` | `session_read` / `session_info` / `session_diff` / `session_fork` |
+| `src/session/tool-helpers.ts` | `shortId`、子串匹配、上下文窗口、会话统计汇总 |
+| `src/session/formatters.ts` | 列表表格、消息渲染、统计块、差异块、搜索结果的格式化 |
+| `src/session/types.ts` | 会话域的全部类型 |
+| `src/session/tools.ts` | 六个工具工厂的统一再导出 |
+| `src/platform/tool-assembly.ts` | 有 `sessionClient` 时注册六个工具 |
 
-标签存储在 opencode 内建的会话 `metadata` 字段（键 `rolebox_tags`），仅当前会话的代理可以读写。如果标签未出现：
+## 备注
 
-- 确认使用 `list=true` 参数查询，而非仅依赖注入摘要
-- 标签数据通过 `session_tag` 写入，不会自动传播到之前已结束的会话
-- 重启会话后，新代理需要通过 `session_tag` 工具重新检索才可看到标签
-
-### 时间线无数据
-
-```
-task_chronology()
-# 返回: No tasks found.
-```
-
-`task_chronology` 追踪的是 dispatch 调度任务。如果当前项目尚未进行任何调度（未使用 `dispatch` 工具），则时间线为空。请先执行至少一次 dispatch 调用。
-
-> **免责声明**
->
-> 本文档基于内部实现策略文档整理。具体行为可能因版本变化而不同，以实际源码为准。实现策略原文参见[会话工具实现策略文档](/04-Advanced/design-decisions/session-tools-strategy)，仅供内部参考。
-
-## 下一步
-
-- [记忆系统](/04-Advanced/memory-system) — 跨会话持久记忆
-- [CLI 使用](/03-Reference/cli) — 命令行工具完整参考
-- [调度配置](/03-Reference/dispatch-config) — 并发与预算控制
+> 自 v0.17.0 起，rolebox 提供六个会话内省工具；自 v1.8.0 起，会话列表与搜索表格输出完整 ID，不再截断为 12 字符。

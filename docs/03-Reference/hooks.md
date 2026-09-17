@@ -1,154 +1,29 @@
 ---
-title: Hook 机制
-description: 自定义 Hook 参考 — schema、模块接口、HookContext API、过滤器与阶段、安全机制
+title: Hook 机制（Custom Hooks）
+description: 自定义 Hook 参考 — role.yaml 声明字段、模块方法与输入参数、HookContext API、过滤器与阶段、生命周期、优先级、inject() 与安全机制。
 ---
 
-# Hook 机制
+# Hook 机制（Custom Hooks）
 
-> **相关文档：** [扩展机制](/03-Reference/extensions) — 通过扩展系统注册自定义模块 | [role.yaml 参考](/03-Reference/role-yaml) — Hook 配置字段详解 | [自定义 Hook](/02-Guide/custom-hooks) — Hook 开发实战指南
+Hook（挂钩）让你在选定的事件上运行自己的代码：用户发消息、工具执行前后、系统提示词构建、会话生命周期事件。本页是 Hook 的参考——声明字段、模块接口、上下文 API 与运行语义；从零写一个能用的 Hook 见[自定义 Hook](/02-Guide/custom-hooks)。
 
-Hook（挂钩）是 rolebox 提供的一种扩展机制：你可以让自定义代码在特定事件（比如用户发消息、工具执行前后）发生时自动运行，用来检查、修改或记录 agent 的行为。本页是 Hook 的配置与开发参考——先讲怎么在 `role.yaml` 里声明 Hook，再讲如何实现一个 Hook 模块。
+> 相关：[自定义 Hook（任务走查）](/02-Guide/custom-hooks)｜[扩展机制](/03-Reference/extensions)｜[role.yaml 参考](/03-Reference/role-yaml)｜[平台与 Harness](/01-Overview/platform-harnesses)
 
-Hook 在 `role.yaml` 的 `hooks.custom` 字段中声明，并在两个阶段触发：`before`（在内置处理器之前运行）和 `after`（在内置处理器之后运行）。每个 Hook 独立运行 —— 一个 Hook 的失败不会导致 Agent 崩溃。
+> 自 v0.19.0 起，`role.yaml` 支持用 `hooks.custom` 注册自定义 Hook 模块。
 
-::: tip 术语速览
-- **Hook（挂钩）** — 在特定生命周期事件触发时注入自定义逻辑的机制。
-- **API（应用程序接口，Application Programming Interface）** — 软件对外提供的调用接口；本文的 `HookContext API` 指 Hook 上下文对象对外开放的属性与方法。
-:::
+## 最小示例
 
-## Schema
-
-```yaml
-hooks:
-  custom:
-    - name: my-quality-checker
-      description: "在编辑后检查代码质量"
-      events: [tool.execute.after, chat.message]
-      module: hooks/quality-checker.js
-      config:
-        severity: warn
-        checks: [no_console_log]
-      filter:
-        tools: [edit, write, hashline_edit]
-      priority: 50
-      phase: after
-```
-
-## 字段说明
-
-| 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `name` | string | — | Hook 的唯一标识符 |
-| `description` | string | — | 可读描述 |
-| `events` | string[] | — | 监听的事件：`chat.message`、`tool.execute.before`、`tool.execute.after`、`system.transform`、`event` |
-| `module` | string | — | Hook 模块文件路径（相对于角色目录或绝对路径） |
-| `config` | object | — | 运行时传递给 Hook 的任意配置 |
-| `filter` | object | — | 限制 Hook 触发条件 |
-| `filter.tools` | string[] | — | 仅对指定工具名称触发（适用于 `tool.execute.before` / `tool.execute.after`） |
-| `filter.eventTypes` | string[] | — | 仅对指定事件类型触发（适用于 `event`：`session.idle`、`session.error` 等） |
-| `priority` | number | `50` | 数值越小，在同阶段中越早执行 |
-| `phase` | string | `"after"` | `"before"`（在内置逻辑之前运行）或 `"after"`（在内置逻辑之后运行） |
-
-## Hook 模块接口
-
-每个 Hook 模块是一个 JavaScript/TypeScript 文件，导出一个包含可选处理器方法的对象：
-
-| 方法 | 触发时机 | 输入参数 |
-|---|---|---|
-| `onChatMessage(ctx, { text })` | 用户发送消息后 | 完整的消息文本 |
-| `onToolBefore(ctx, { tool, args })` | 工具执行之前 | 工具名称和参数 |
-| `onToolAfter(ctx, { tool, args, output })` | 工具执行之后 | 工具名称、参数和结果输出 |
-| `onSystemTransform(ctx, { system })` | 构建系统提示词期间 | 系统提示词数组（可修改） |
-| `onEvent(ctx, { type, properties })` | 生命周期事件时 | 事件类型和属性 |
-| `onLoad(ctx)` | Hook 注册时调用一次 | — |
-| `onDispose(ctx)` | 插件关闭时调用一次 | — |
-
-## HookContext API
-
-每个处理器接收一个 `ctx`（HookContext）对象：
-
-| 属性 | 类型 | 说明 |
-|---|---|---|
-| `hookName` | string | Hook 配置的名称 |
-| `config` | object \| undefined | 来自 role.yaml 的 Hook `config` |
-| `sessionID` | string \| undefined | 当前会话 ID（可用时） |
-| `agent` | string \| undefined | 当前代理 ID（可用时） |
-| `inject(text)` | function | 向下一个系统提示词追加文本（使用 `appendCorrection` 机制） |
-| `log` | Logger | 绑定到此 Hook 的结构化日志记录器 |
-
-## 过滤器与阶段
-
-**过滤器（Filter）** 限制哪些工具调用或事件触发 Hook：
-
-```yaml
-filter:
-  tools: [write, edit]          # 仅在 write/edit 工具调用时触发
-  eventTypes: [session.error]   # 仅在 session.error 事件时触发
-```
-
-**阶段（Phase）** 控制 Hook 相对于内置处理器的执行顺序：
-
-- `"before"` — 在内置处理器执行逻辑之前触发
-- `"after"`（默认） — 在内置处理器完成后触发
-
-同一阶段的多个 Hook 按 `priority`（数值越小越早执行）排序。相同优先级时，保持注册顺序。
-
-### 执行顺序全景
-
-以下序列图展示一次事件（如 `tool.execute.before`）触发时的完整执行流水线，包括内置 Hook、自定义 Hook 和核心处理器的执行顺序（验证自 `src/hooks/event-handler.ts`）：
-
-```mermaid
-sequenceDiagram
-    participant Event as 事件触发
-    participant BHook as 内置 Hook
-    participant CHook as 自定义 Hook (before)
-    participant Core as 核心处理器
-    participant CHook2 as 自定义 Hook (after)
-    participant BHook2 as 内置 Hook (after)
-
-    Event->>BHook: 内置 Hook: before 阶段
-    Note over BHook: 按 priority 排序执行
-    BHook->>CHook: 自定义 Hook: before 阶段
-    Note over CHook: 按 priority 排序执行
-    
-    alt 工具事件 (tool.execute.before/after)
-        CHook->>Core: filter.tools 匹配？
-        Note over Core: 是 → 执行核心逻辑<br>否 → 跳过
-    else 消息事件 (chat.message)
-        CHook->>Core: 核心处理器执行
-    else 系统转换 (system.transform)
-        CHook->>Core: 核心处理器执行
-    else 生命周期事件 (event)
-        CHook->>Core: switch(event.type) 分发
-        Note over Core: session.idle → 函数延续<br>session.status → dispatch 调度<br>session.error → 错误处理
-    end
-
-    Core->>CHook2: 自定义 Hook: after 阶段
-    Note over CHook2: 按 priority 排序执行
-    CHook2->>BHook2: 内置 Hook: after 阶段
-    Note over BHook2: 按 priority 排序执行
-    BHook2-->>Event: 执行完成
-```
-
-::: info 执行顺序要点
-- **phase 控制顺序**：`before` → 核心处理器 → `after`，而不是自定义 Hook 的先后
-- **内置 vs 自定义**：内置 Hook 先于自定义 Hook 的 before 阶段，后于 after 阶段——确保系统级行为始终优先或兜底
-- **优先级排序**：同阶段同类型的 Hook 按 `priority`（默认 50，越小越早）排序
-- **异常隔离**：每个 Hook 独立 try/catch，一个 Hook 的失败不会影响同阶段的其他 Hook
-:::
-
-## 完整示例
+在 `role.yaml` 里声明一个 Hook，再写它的模块：
 
 ```yaml
 # role.yaml
-name: Quality-Conscious Coder
-description: 警告调试代码并强制执行规范
+name: quality-coder
 hooks:
   custom:
     - name: no-console-log
-      description: 检测文件写入中的遗漏 console.log
+      description: 文件写入里出现 console.log 时提醒
       events: [tool.execute.after]
-      module: hooks/no-console-log.js
+      module: /abs/path/to/hooks/no-console-log.js
       filter:
         tools: [write, edit]
       priority: 10
@@ -156,252 +31,352 @@ hooks:
 ```
 
 ```javascript
-// hooks/no-console-log.js
+// /abs/path/to/hooks/no-console-log.js
 export default {
-  onToolAfter: (ctx, { tool, args, output }) => {
+  onToolAfter: (ctx, { tool, args }) => {
     const content = typeof args?.content === "string" ? args.content : "";
     if (content.includes("console.log(")) {
-      ctx.inject(`警告：${tool} 输出中发现 console.log()。`);
+      ctx.inject(`警告：${tool} 写入的内容里有 console.log()。`);
     }
   },
 };
 ```
 
-## Hook Lifecycle Diagram
+模块路径建议写绝对路径：相对路径以 rolebox 运行时的工作目录为基准解析，而不是角色目录。
 
-Hook 的完整生命周期从注册到销毁经历三个阶段：初始化（`onLoad`）、事件循环（多轮事件分发）、销毁（`onDispose`）。以下时序图展示了这一流程，验证自 `src/hooks/custom/registry.ts`：
+## `hooks` 声明
 
-```mermaid
-sequenceDiagram
-    participant YAML as role.yaml
-    participant Reg as CustomHookRegistry
-    participant Mod as Hook Module
-    participant Plugin as Plugin (dispose)
+`hooks:` 有三个子键：`custom`（自定义 Hook 列表）、`builtin`（恢复型内置 Hook 开关）、`recovery`（恢复引擎配置）。
 
-    YAML->>Reg: register(hookConfig, roleDir)
-    Reg->>Mod: loadHookModule(modulePath)
-    Mod-->>Reg: HookModule | null
-
-    alt module loaded successfully
-        Reg->>Reg: module.onLoad(ctx)
-        Note over Reg: 初始化资源、记录日志
-
-        loop 每次事件触发
-            Note over Reg,Mod: 事件循环（多轮）
-            alt tool.execute.before
-                Reg->>Mod: onToolBefore(ctx, { tool, args })
-            else tool.execute.after
-                Reg->>Mod: onToolAfter(ctx, { tool, args, output })
-            else chat.message
-                Reg->>Mod: onChatMessage(ctx, { text })
-            else system.transform
-                Reg->>Mod: onSystemTransform(ctx, { system })
-            else event
-                Reg->>Mod: onEvent(ctx, { type, properties })
-            end
-            Mod-->>Reg: 处理完成（异常被 try/catch 捕获）
-        end
-    end
-
-    Plugin->>Reg: dispose()
-    Reg->>Mod: module.onDispose(ctx)
-    Note over Reg: 清理资源、释放连接
-    Reg->>Reg: byEvent.clear()
+```yaml
+hooks:
+  custom:
+    - name: my-hook
+      events: [chat.message]
+      module: ./hooks/my-hook.js
+  builtin:
+    recovery: true
+    session_error: true
+  recovery:
+    max_attempts: 3
 ```
 
-生命周期验证点（`src/hooks/custom/registry.ts`）：
+### `hooks.custom[]` 字段
 
-| 方法 | 触发时机 | 源码行 |
-|------|---------|--------|
-| `onLoad(ctx)` | 模块加载成功后立即调用 | `:37-48` |
-| 事件处理器 | 每次匹配事件触发时调用（try/catch 包裹） | `:112-128` |
-| `onDispose(ctx)` | `registry.dispose()` 调用时执行 | `:190-214` |
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `name` | string | 必填 | Hook 的唯一标识 |
+| `description` | string | — | 可读描述 |
+| `events` | string[] | 必填 | 订阅的事件，取值见下方事件表 |
+| `module` | string | 必填 | Hook 模块路径；绝对路径直接使用，相对路径按运行时工作目录解析 |
+| `config` | object | — | 任意配置，原样出现在 `ctx.config` |
+| `filter` | object | — | 触发限制，见「过滤器与阶段」 |
+| `filter.tools` | string[] | — | 只在这些工具上触发（仅 `tool.execute.*`） |
+| `filter.eventTypes` | string[] | — | 只在这些事件类型上触发（仅 `event`） |
+| `priority` | number | `50` | 同一阶段内数值越小越早执行 |
+| `phase` | `"before"` / `"after"` | `"after"` | 与内置处理器及核心逻辑的相对时机 |
 
-## onLoad / onDispose 生命周期
+### 事件与处理器
 
-Hook 模块可以实现 `onLoad` 和 `onDispose` 生命周期方法（合约定义见 `src/hooks/custom/types.ts:82-84`）：
+| 事件 | 触发时机 | 处理器 |
+|---|---|---|
+| `chat.message` | 用户消息进入后 | `onChatMessage` |
+| `tool.execute.before` | 工具执行之前 | `onToolBefore` |
+| `tool.execute.after` | 工具执行之后 | `onToolAfter` |
+| `system.transform` | 系统提示词构建期间 | `onSystemTransform` |
+| `event` | 生命周期事件（`session.idle`、`session.error` 等） | `onEvent` |
+
+## Hook 模块接口
+
+模块默认导出一个对象，属性都是**可选**的处理器，只实现需要的那几个。下面逐个给出触发时机、输入参数与示例；生命周期方法 `onLoad` / `onDispose` 不是事件处理器，见「生命周期」。
+
+### `onChatMessage(ctx, { text })`
+
+用户消息进入后调用，可读取、记录或按关键词追加提醒。
 
 ```javascript
-// hooks/lifecycle-example.js
+onChatMessage: (ctx, { text }) => {
+  if (text.includes("紧急")) ctx.inject("这是一条加急请求，请优先处理。");
+},
+```
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `ctx` | HookContext | 见「HookContext API」 |
+| `text` | string | 本轮消息的首个文本 part |
+
+### `onToolBefore(ctx, { tool, args })`
+
+工具执行之前调用，适合校验参数与记录审计信息。
+
+```javascript
+onToolBefore: (ctx, { tool, args }) => {
+  if (tool === "bash" && String(args?.command ?? "").includes("rm -rf")) {
+    ctx.inject("检测到 rm -rf，请先确认目标路径。");
+  }
+},
+```
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `ctx` | HookContext | 见「HookContext API」 |
+| `tool` | string | 工具名（工具注册名，如 `write`、`bash`） |
+| `args` | unknown | 该工具本次的调用参数 |
+
+### `onToolAfter(ctx, { tool, args, output })`
+
+工具执行之后调用，是最常用的处理器（质量检查、结果校验都在这里）。
+
+```javascript
+onToolAfter: (ctx, { tool, output }) => {
+  const text = typeof output === "string" ? output : JSON.stringify(output ?? "");
+  if (tool === "bash" && /\bFAIL\b/.test(text)) {
+    ctx.inject("上一条命令输出里出现了 FAIL，请核对结果。");
+  }
+},
+```
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `ctx` | HookContext | 见「HookContext API」 |
+| `tool` | string | 工具名 |
+| `args` | unknown | 该工具本次的调用参数 |
+| `output` | unknown | 该工具本次的返回结果 |
+
+### `onSystemTransform(ctx, { system })`
+
+构建系统提示词期间调用。`system` 就是要发给模型的条目数组，直接改数组即生效。
+
+```javascript
+onSystemTransform: (ctx, { system }) => {
+  system.push("<repo-rules>\n提交前必须跑 bun test。\n</repo-rules>");
+  // 也可以按标签操作：ctx.replaceBlock("repo-rules", "新内容") / ctx.removeBlock("repo-rules")
+},
+```
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `ctx` | HookContext | 见「HookContext API」 |
+| `system` | string[] | 系统提示词条目数组（可变） |
+
+### `onEvent(ctx, { type, properties })`
+
+生命周期事件到达时调用，`type` 是事件类型，`properties` 是该事件的原始属性。
+
+```javascript
+onEvent: (ctx, { type, properties }) => {
+  if (type === "session.error") {
+    ctx.log.warn("会话出错", { sessionID: properties?.sessionID });
+  }
+},
+```
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `ctx` | HookContext | 见「HookContext API」 |
+| `type` | string | 事件类型，如 `session.idle`、`session.error`、`session.deleted` |
+| `properties` | object \| undefined | 事件属性（各类型不同，常见键为 `sessionID`） |
+
+## HookContext API
+
+每个处理器收到的 `ctx`（HookContext）提供下表成员：
+
+| 成员 | 类型 | 说明 |
+|---|---|---|
+| `hookName` | string | Hook 名。事件处理器拿到的是阶段占位符 `[custom.before]` / `[custom.after]`；只有 `onLoad` / `onDispose` 是配置里的 `name` |
+| `config` | object \| undefined | `role.yaml` 中该 Hook 的 `config` |
+| `sessionID` | string \| undefined | 当前会话 ID（可用时） |
+| `agent` | string \| undefined | 当前代理 ID；`chat.message`、`tool.execute.after`、`system.transform` 的 ctx 有值，`tool.execute.before` 与 `event` 的 ctx 没有 |
+| `inject(text)` | function | 向下一个系统提示词追加文本，见「inject() 机制」 |
+| `log` | Logger | 结构化日志器：事件处理器为 `hook:custom-before` / `hook:custom-after`，`onLoad` / `onDispose` 为 `hook:<name>` |
+| `replaceBlock(tag, newContent)` | function \| undefined | 替换系统提示词中以 `<tag>` 开头的块；仅 `system.transform` 生效，其余事件为 no-op |
+| `removeBlock(tag)` | function \| undefined | 删除 `<tag>` 块；仅 `system.transform` 生效，其余事件为 no-op |
+| `getBlocks()` | function \| undefined | 读取当前系统提示词块列表（`{ tag, content }`）；非 `system.transform` 返回空数组 |
+| `getFunctionState(fnName)` | function \| undefined | 读取函数运行时状态 |
+| `getDispatchState()` | function \| undefined | 读取调度快照：`{ activeTaskCount, tasks }` |
+| `skip()` | function \| undefined | 在事件输入对象上置位 `__skip` 标记 |
+| `retry()` | function \| undefined | 在事件输入对象上置位 `__retry` 标记 |
+
+带 `| undefined` 的成员由注册中心在每次分发前按事件装配；`onLoad` / `onDispose` 的 ctx 只有 `hookName`、`config`、`log` 和一个空操作的 `inject`。
+
+**关于 `skip()` / `retry()`**：这两个方法只在事件输入对象上写入标记，当前版本没有读取这两个标记的处理器，因此调用是安全的，但不会跳过或重试任何内置处理。
+
+## 过滤器与阶段
+
+两个开关各管一半：`filter` 决定**要不要**为这次事件调用 Hook，`phase` 决定调用发生在内置逻辑的**哪一侧**。
+
+```yaml
+hooks:
+  custom:
+    - name: write-audit
+      events: [tool.execute.after]
+      module: ./hooks/audit.js
+      filter:
+        tools: [write, edit]     # 只在 write / edit 上触发
+      phase: after               # 内置处理器之后
+```
+
+| 键 | 生效事件 | 语义 |
+|---|---|---|
+| `filter.tools` | `tool.execute.before` / `tool.execute.after` | 本次工具名不在列表里就跳过该 Hook |
+| `filter.eventTypes` | `event` | 本次事件 `type` 不在列表里就跳过该 Hook |
+
+一次事件固定穿过五段，`phase` 就是第 2 段与第 4 段的分界：
+
+1. 内置 Hook `before` 阶段
+2. 自定义 Hook `before` 阶段（按 `priority` 升序）
+3. 核心处理器（工具调用、消息处理、事件分发）
+4. 自定义 Hook `after` 阶段（按 `priority` 升序）
+5. 内置 Hook `after` 阶段
+
+每个处理器各自被 try/catch 包裹，前一个 Hook 抛错不会影响同一阶段的其他 Hook，也不会影响核心处理器。
+
+## 生命周期：`onLoad` / `onDispose`
+
+两个生命周期方法都是可选的，签名相同（`(ctx) => void | Promise<void>`），收到的是同一个精简 HookContext（只有 `hookName`、`config`、`log`，`inject` 是空操作）：
+
+| 方法 | 签名 | 摘要 |
+|---|---|---|
+| `onLoad` | `onLoad(ctx)` | 模块加载成功后调用一次，适合初始化资源 |
+| `onDispose` | `onDispose(ctx)` | 插件 dispose 时调用一次，适合清理资源 |
+
+```javascript
+// hooks/lifecycle.js
 export default {
   onLoad: (ctx) => {
-    // Hook 注册时调用一次，适合初始化资源
-    // ctx 包含 hookName、config、log 等
-    ctx.log.info(`Hook ${ctx.hookName} loaded`);
+    ctx.log.info(`Hook ${ctx.hookName} 已加载`);
   },
   onDispose: (ctx) => {
-    // 插件关闭时调用一次，适合清理资源
-    ctx.log.info(`Hook ${ctx.hookName} disposed`);
+    ctx.log.info(`Hook ${ctx.hookName} 已卸载`);
   },
 };
 ```
 
-::: tip 生命周期使用建议
-`onLoad` 适合初始化数据库连接、加载配置文件等一次性操作；`onDispose` 适合关闭连接、释放文件句柄等清理操作。避免在 `onLoad` 中执行耗时过长或可能阻塞的操作，因为 Hook 注册是插件初始化流程的一部分，阻塞会影响整个插件的启动速度。
-:::
+| 时机 | 行为 |
+|---|---|
+| 模块加载成功后 | 调用一次 `onLoad`，适合初始化资源 |
+| 插件 dispose | 对每个实现了 `onDispose` 的 Hook 调用一次，适合清理资源；同名 Hook 只调用一次 |
+| `onLoad` 抛异常 | 记录 `Custom hook "<name>" onLoad threw`，Hook 仍然注册并继续参与事件分发 |
+| 模块加载失败 | 不调用 `onLoad`；该 Hook 仍登记在事件表里，但分发时被跳过 |
 
-## 优先级排序示例
+不要在 `onLoad` 里执行耗时或可能阻塞的操作——它属于插件初始化流程的一部分。
 
-同一阶段的多个 Hook 按照 `priority` 字段排序（数值越小越早执行）。默认优先级为 `50`（`src/hooks/custom/types.ts:29`）。
+## 优先级
 
-以下配置：
+同一阶段内按 `priority` 升序执行，默认 `50`：
 
 ```yaml
 hooks:
   custom:
     - name: early-checker
       events: [tool.execute.before]
-      module: hooks/early-checker.js
-      priority: 10          # 高优先级（先执行）
+      module: ./hooks/early.js
       phase: before
-
+      priority: 10
     - name: late-checker
       events: [tool.execute.before]
-      module: hooks/late-checker.js
-      priority: 50          # 低优先级（后执行）
+      module: ./hooks/late.js
       phase: before
+      priority: 50
 ```
 
-执行顺序：`early-checker` (priority 10) → `late-checker` (priority 50)。
+执行顺序为 `early-checker` → `late-checker`。两个 Hook 的 `priority` 相同时保持 `role.yaml` 中的声明顺序。
 
-如果两个 Hook 具有相同的 `priority` 值，它们会按照在 YAML 中的注册顺序执行。
+## `inject()` 机制
 
-## 内置 Hook
+`ctx.inject(text)` 不立即改写系统提示词，而是把文本排进**下一个**系统提示词：
 
-rolebox 内置两套机制：**核心事件处理器**（始终生效，处理每个事件阶段）与**恢复型内置 Hook**（通过 `hooks.builtin` 开关控制）。
+```javascript
+onToolAfter: (ctx, { tool }) => {
+  if (tool === "bash") ctx.inject("本轮已执行过 shell 命令，回答前请回读输出。");
+},
+```
 
-### 核心事件处理器（始终生效）
+| 环节 | 行为 |
+|---|---|
+| 调用 | 文本以待注入表按会话 ID 累积；同一会话的多次注入用换行拼接 |
+| 落地 | 下一次 `system.transform` 把累积文本作为一个条目追加进系统提示词 |
+| 清除 | 落地后立即从待注入表删除，不会重复注入 |
+| 无会话 ID | `onLoad` / `onDispose` 的 `inject` 是空操作 |
 
-以下内置处理器对应各生命周期事件，始终注册并运行，**无法**通过 `hooks.builtin` 关闭（注册见 `src/core/services/hook-service.ts:149-244`）：
+在 `system.transform` 的 `before` 阶段注入的文本会在同一轮落地；在其它事件、或 `system.transform` 的 `after` 阶段注入的，都在下一次构建时落地。这条通道与内置护栏共用。
 
-| 处理器 | 事件 | 源码 |
-|---|---|---|
-| `handleChatMessage` | `chat.message` | `src/hooks/chat-message.ts:16` |
-| `handleToolBefore` | `tool.execute.before` | `src/hooks/tool-before.ts` |
-| `handleToolAfter` | `tool.execute.after` | `src/hooks/tool-after.ts` |
-| `handleSystemTransform` | `experimental.chat.system.transform` | `src/hooks/system-transform.ts` |
-| `handleEvent` | 生命周期事件（`session.idle` 等） | `src/hooks/event-handler.ts` |
-| `handleCompacting` | `experimental.session.compacting` | `src/hooks/compaction.ts` |
+## 内置 Hook 开关（`hooks.builtin`）
 
-它们的执行顺序与自定义 Hook 相同：内置 `before` → 自定义 `before` → 核心逻辑 → 自定义 `after` → 内置 `after`（见上文"执行顺序全景"）。
-
-### 恢复型内置 Hook（`hooks.builtin` 开关）
-
-`hooks.builtin` 块控制 **9 个恢复型内置 Hook** 及主开关 `recovery`（默认 `true`）。每个开关对应一个 `configKey`；显式设为 `false` 即禁用对应 Hook（`src/recovery/builtin/registry.ts:19-35`、`src/core/services/recovery-service.ts:53-85`）：
-
-| `hooks.builtin` 键 | 内置 Hook | 触发事件 | 阶段 | 默认 |
-|---|---|---|---|---|
-| `recovery`（主开关） | — | — | — | `true` |
-| `session_error` | session-error-recovery | `event`（`session.error`） | after | `true` |
-| `edit_error` | edit-error-recovery | `tool.execute.after` | after | `true` |
-| `json_error` | json-error-recovery | `tool.execute.after` | after | `true` |
-| `context_window` | context-window-monitor | `tool.execute.after` / `event` | after | `true` |
-| `empty_response` | empty-response-detector | `tool.execute.after` | after | `true` |
-| `tool_pair_validation` | tool-pair-validator | `system.transform` | after | `false` |
-| `write_existing_file_guard` | write-existing-file-guard | `tool.execute.before` | before | `false` |
-| `bash_file_read_guard` | bash-file-read-guard | `tool.execute.before` | before | `false` |
-| `webfetch_redirect_guard` | webfetch-redirect-guard | `tool.execute.after` | after | `false` |
-
-**默认策略（`src/core/services/recovery-service.ts:53-83`）：** 错误恢复类 Hook（`session_error`、`edit_error`、`json_error`、`context_window`、`empty_response`）默认开启；护栏类 Hook（`tool_pair_validation`、`write_existing_file_guard`、`bash_file_read_guard`、`webfetch_redirect_guard`）默认关闭。主开关 `recovery: false` 会禁用整个恢复引擎及全部恢复型内置 Hook。
+`hooks.builtin` 是一个 `Record<string, boolean>`：`recovery` 是主开关，其余 9 个键各对应一个恢复型内置 Hook。错误恢复类默认开启，护栏类默认关闭。
 
 ```yaml
 hooks:
   builtin:
-    recovery: true               # 主开关（默认 true）
-    session_error: true          # 错误恢复类（默认 true）
-    bash_file_read_guard: false  # 护栏类（默认 false）
-    # ... 可覆盖上表中任意 configKey
+    recovery: true                    # 主开关；false 会禁用恢复引擎与全部内置 Hook
+    session_error: true               # 错误恢复类，默认 true
+    write_existing_file_guard: true   # 护栏类，默认 false，这里显式打开
 ```
 
-### `auto_activate` 不是 `hooks.builtin` 键
+| 键 | 内置 Hook | 事件 | 阶段 | 默认 |
+|---|---|---|---|---|
+| `recovery` | 主开关 | — | — | `true` |
+| `session_error` | session-error-recovery | `event`（`session.error`） | after | `true` |
+| `edit_error` | edit-error-recovery | `tool.execute.after`（`edit` / `write` / `hashline_edit`） | after | `true` |
+| `json_error` | json-error-recovery | `tool.execute.after` | after | `true` |
+| `context_window` | context-window-monitor | `tool.execute.after` / `event` | after | `true` |
+| `empty_response` | empty-response-detector | `tool.execute.after` | after | `true` |
+| `tool_pair_validation` | tool-pair-validator | `system.transform` | after | `false` |
+| `write_existing_file_guard` | write-existing-file-guard | `tool.execute.before`（`write`） | before | `false` |
+| `bash_file_read_guard` | bash-file-read-guard | `tool.execute.before`（`bash`） | before | `false` |
+| `webfetch_redirect_guard` | webfetch-redirect-guard | `tool.execute.after`（`webfetch`） | after | `false` |
 
-`auto_activate` **不是** `hooks.builtin` 的可开关项，而是 `role.yaml` 的**顶层字段**（`src/types.core.ts:76`），取值为函数名数组：
+内置 Hook 与自定义 Hook 共用上面那套五段顺序，各自的 `filter` 与 `priority` 语义也一致。
 
-```yaml
-# role.yaml 顶层字段
-auto_activate:
-  - security-guard
-locked: true     # 可选：锁定自动激活的函数，使其无法被停用
-```
-
-首条用户消息到达时，`chat.message` 处理器检查当前代理的 `auto_activate` 列表并自动激活匹配的函数（`src/hooks/chat-message.ts:98-122`）；`roleAutoActivateMap` / `roleLockedMap` 在 Hook 服务初始化时从 `role.config.auto_activate` 与 `locked` 填充（`src/core/services/hook-service.ts:67-77`）。
-
-不要在 `hooks.builtin` 中写 `auto_activate`——该键不会被解析，会被静默忽略。
-
-## `inject()` 机制详解
-
-`inject(text)` 是 `HookContext` 提供的方法（定义见 `src/hooks/custom/types.ts:54`），用于向下一个系统提示词追加文本。其底层依赖 `appendCorrection` 系统（`src/hooks/context.ts:8-15`）：
-
-```typescript
-// context.ts — appendCorrection 实现
-function appendCorrection(
-  corrections: Map<string, string>,
-  sessionID: string,
-  text: string,
-): void {
-  const existing = corrections.get(sessionID);
-  corrections.set(sessionID, existing ? existing + "\n" + text : text);
-}
-```
-
-- `appendCorrection` 以会话 ID 为键，将追加文本存储在 `pendingCorrections` Map 中。
-- 如果同一个会话有多个追加请求，文本会通过换行符拼接。
-- 在下一个系统提示词构建时，这些追加内容会被注入到 `system.transform` 阶段，与内置护栏使用相同的通道。
+`auto_activate` **不是**这里的键：它是 `role.yaml` 的顶层字段（同级还有 `locked`），由内置的 `chat.message` 处理器在首条用户消息到达时按列表自动激活函数，写在 `hooks.builtin` 里不会被解析。字段本身见 [role.yaml 参考](/03-Reference/role-yaml)。
 
 ## 安全机制
 
-- **Hook 不会导致 Agent 崩溃**。每个 Hook 处理器都用 try/catch 包裹 —— 失败时记录警告并继续执行。
-- `inject()` 机制通过已有的 `appendCorrection` 系统向下一个系统提示词追加内容，与内置护栏使用相同的通道。
-- 模块加载失败（文件缺失、语法错误）会被记录日志，该 Hook 会被跳过 —— 注册中心（此处指登记 Hook 模块的容器）存储 `null` 并继续运行。
+- **故障隔离**：每个处理器单独 try/catch，失败只记一条 `Custom hook "<name>" failed on <event>`，同一阶段的其他 Hook 与核心逻辑继续执行，Agent 不会因此崩溃。
+- **加载失败可降级**：模块缺失或语法错误时模块记为 `null` 并被跳过，插件照常启动。
+- **模块缓存**：模块按解析后的绝对路径缓存，同一路径只加载一次；加载失败也会被缓存，后续同路径请求不再重试。修改模块代码后需要重启进程。
+- **模块作用域隔离**：每个 Hook 模块有自己的模块作用域，全局状态不共享；跨 Hook 传数据用 `config`，或自行持久化到文件。
+- **注入通道受控**：`inject()` 只能追加文本，且与内置护栏走同一条待注入通道。
 
-::: warning Hook 模块隔离
-每个自定义 Hook 模块运行在独立的模块作用域中。一个 Hook 的全局状态不会自动与其他 Hook 共享。如果需要跨 Hook 通信，应使用 `config` 字段传递参数，或将共享状态持久化到文件或内存中合适的全局 Map（仅用于同进程通信，不建议依赖跨进程的共享状态）。
-:::
+## 平台差异（harness）
 
-## 自定义 Hook 调试
+| Harness | 自定义 Hook | 恢复型内置 Hook | 说明 |
+|---|---|---|---|
+| opencode | 支持 | 支持 | 完整装配：生命周期处理器同时注入 `customHooks` 与 `builtInHooks` |
+| pi | 支持 | 不装配 | Pi 的 Hook 管线只注入各角色声明的 `customHooks`；恢复/内置引擎是 opencode 专有 |
+| dsh | 未接线 | 未接线 | dsh 的 Hook provider 只映射 chat-message / tool-before / tool-after 三类扩展点，且启动时传入空回调 |
 
-### 使用 `rolebox info --check` 验证 Hook 配置
+因此本页描述的两类 Hook 属于 opencode 路径：在 pi 上恢复型内置 Hook 不参与，在 dsh 上自定义 Hook 当前不会触发。三套 harness 的目录与能力总览见[平台与 Harness](/01-Overview/platform-harnesses)。
 
-`rolebox info <role> --check` 命令可验证角色的完整性哈希，包括 Hook 模块路径的有效性：
+## 排错
 
-```bash
-rolebox info my-role --check
-```
+### Hook 没有触发
 
-该命令会检查：
-- `role.yaml` 中 `hooks.custom` 声明的 `module` 路径是否可解析
-- 模块文件是否存在（基于相对角色目录或绝对路径）
-- 完整性哈希是否与角色缓存一致
+| 检查点 | 说明 |
+|---|---|
+| `events` | 必须是 5 个事件名之一；写错的名称不会报错，只是永远不匹配 |
+| `filter.tools` | 工具名不在列表里会静默跳过，工具名以注册名为准（`write`、`edit`、`bash` 等） |
+| `filter.eventTypes` | 只对 `event` 生效，比较的是事件实际的 `type` |
+| `phase` | `before` / `after` 都会触发，它只决定与内置处理器的相对顺序 |
+| `module` 路径 | 相对路径以运行时工作目录为基准；同一角色在不同项目目录下会解析到不同的相对路径，用绝对路径最稳 |
 
-如果模块路径无效，`rolebox info` 会输出警告信息，提示 Hook 注册失败的原因。
+### 模块加载失败
 
-### 日志诊断
+日志前缀 `hook:custom-loader`，消息 `Failed to load custom hook module`，附带解析后的绝对路径与异常。常见原因是文件不存在、扩展名不被运行时识别，或模块顶层 import 了不存在的依赖。
 
-Hook 系统使用结构化日志（`createSubLogger`），日志前缀包含 `hook:` 标识：
+### 处理器抛异常
 
-| 日志前缀 | 来源 | 典型消息 |
-|----------|------|---------|
-| `hook:custom-loader` | `src/hooks/custom/loader.ts:5` | `Failed to load custom hook module` — 模块加载失败 |
-| `hook:custom-registry` | `src/hooks/custom/registry.ts:8` | `Registered custom hook` / `onLoad threw` / `failed on {event}` |
-| `hook:{name}` | `src/hooks/custom/registry.ts:42` | 每个 Hook 实例的独立日志器 |
+日志前缀 `hook:custom-registry`，消息 `Custom hook "<name>" failed on <event>`。异常不会中断事件分发，但该处理器本次的副作用会丢失。
 
-常见调试场景：
+### 日志前缀对照
 
-```
-# 模块加载失败（文件缺失或语法错误）
-hook:custom-loader | WARN | Failed to load custom hook module
-  modulePath: /path/to/hooks/my-hook.js
-  err: Error: Cannot find module ...
+| 前缀 | 来源 | 典型消息 |
+|---|---|---|
+| `hook:custom-loader` | 模块加载 | `Failed to load custom hook module` |
+| `hook:custom-registry` | 注册与分发 | `Registered custom hook` / `onLoad threw` / `failed on <event>` |
+| `hook:custom-before` / `hook:custom-after` | 事件处理器 ctx 的 `log` | 处理器自己写下的日志 |
+| `hook:<name>` | `onLoad` / `onDispose` 的 ctx 的 `log` | 同上 |
 
-# Hook 处理器运行时异常
-hook:custom-registry | WARN | Custom hook "my-checker" failed on tool.execute.after
-```
+### 用 CLI 检查角色
 
-### 加载失败处理
-
-模块加载失败不会阻塞其他 Hook 或导致 Agent 崩溃。`loadHookModule()`（`src/hooks/custom/loader.ts:9-28`）在失败时返回 `null` 并将缓存标记为 `null`，后续同路径加载请求直接返回 `null` 而不重新尝试。
-
-## 下一步
-
-- [自定义 Hook](/02-Guide/custom-hooks) — Hook 开发实战指南
-- [扩展机制](./extensions) — 了解如何通过扩展系统注册自定义模块
+`rolebox info <role> --check` 校验的是角色完整性哈希（通过打印 `Integrity check passed`，不一致打印 `Integrity check FAILED` 并以退出码 1 结束）。它**不**解析也不校验 `hooks.custom` 的 `module` 路径，通过它无法确认 Hook 是否可加载。

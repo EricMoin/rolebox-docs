@@ -1,393 +1,217 @@
 ---
-title: 记忆系统
-description: 跨会话、跨角色的持久记忆系统 — 即时写入与合并回顾双机制、SQLite 存储、FTS5 全文搜索
+title: 记忆系统实现
+description: rolebox 记忆子系统的内部实现 — 双机制、SQLite + FTS5 存储、注入链路、部分更新、清理与淘汰
 ---
 
-# 记忆系统
+# 记忆系统（Memory System）
 
-> **v0.20.0 引入** — SQLite 持久化记忆系统，支持 FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5）全文搜索、双层作用域与自动注入（CHANGELOG.md:140）
+记忆是 rolebox 唯一自带持久化的知识通道：代理在会话中写入的决策与教训落进工作区里的一个 SQLite 文件，并在之后的提示组装中被读成一段摘要。
+本页讲这条链路的实现——存储结构、注入时机、更新语义、淘汰条件，以及哪些设计只停留在纸面上。
 
-
-> **相关文档：** [记忆策略（设计决策）](/04-Advanced/design-decisions/memory-strategy) — 存储架构与淘汰策略 | [会话工具](/04-Advanced/session-tools) — 会话搜索与分析 | [CLI 参考](/03-Reference/cli) — `rolebox memory` 子命令
-
-记住昨天、上周、上个月的决策与经验 — 代理不再遗忘。
-
-rolebox 的记忆系统解决了 AI 代理在会话结束后丢失上下文的根本问题。通过两种互补机制，代理能够跨会话、跨角色持久保存知识。
+> **本页边界**：记忆的用法（`|memory|` 合并回顾、CLI 工作流）见[教程 07 让代理记住你](/02-Guide/tutorial/07-memory)；`memory_write` / `memory_recall` / `memory_list` / `memory_update` 四个工具的**参数与返回格式**见[会话与记忆工具](/03-Reference/tools/session-memory-tools)；逐命令说明见 [CLI 参考](/03-Reference/cli)；2026-07 的原始设计记录见[记忆策略（设计决策）](/04-Advanced/design-decisions/memory-strategy)。
 
 ## 两种记忆机制
 
-### 1. 即时记忆 (Instant Memory)
+记忆有两条写入入口，共用同一份存储：一条是代理在会话中主动调用工具（即时记忆），另一条是内置函数在回顾模式下批量整理（合并回顾）。
 
-工作中的角色主动调用 `memory_write` 工具，在任务执行期间即时记录：
+### 即时记忆（Instant Memory）
 
-- **决策**：为什么选择这种方案而非其他
-- **偏好**：用户的风格、结构或工作流偏好
-- **事实**：项目的依赖结构、模块职责、数据流
-- **教训**：什么失败了、为什么、需要注意什么
-- **笔记**：任意需要跨会话保留的信息
+代理在任务执行期间调用 `memory_write` 落盘一条条目。工具本身很薄：打开工作区的 `MemoryStore`，把字段交给 `write()`，然后关闭连接。几个默认值决定了条目落在哪一层：
 
-调用方式：
+| 字段 | 默认值 | 实现效果 |
+|------|--------|----------|
+| `scope` | `role` | 只对该角色可见；`workspace` 才对所有角色可见 |
+| `role_id` | `workspace` 作用域下为 `shared`，否则为 `context.agent ?? "unknown"` | 作用域过滤的实际比较值 |
+| `category` | `note` | 供 `memory_recall` 按分类过滤 |
+| `relevance` | `medium` | 参与注入的 `min_relevance` 门槛与 `clean` 的档位过滤 |
+| `source_sessions` | `[]` | 见下文的实现落差 |
 
-```
-memory_write(title="Auth 使用 JWT+Refresh Token", content="认证系统选用...", category="decision", relevance="high")
-```
+条目 ID 由 `shortHash(title + Date.now())` 生成，是 12 个十六进制字符；`created_at` 与 `updated_at` 写同一次时间戳，插入在事务中完成。
 
-### 2. 合并回顾 (Consolidation)
+### 合并回顾（Consolidation）
 
-用户激活 `|memory|` 命令后，当前代理进入记忆合并模式，回顾项目会话并批量写入或更新记忆。支持多种模式：
+合并回顾**不是一段代码**，而是一个内置函数文件：`functions/memory.md`。它声明 `params: { scope: all }`，正文是一份给代理的操作指令——先 `memory_list` 看已有记忆，再 `session_list` 列出会话，跳过已处理的会话，用 `session_read` 读取内容，写之前先用 `memory_recall` 查重，最后用 `memory_write` 或 `memory_update` 落盘。
 
-```
-|memory|                  # 增量模式：仅处理未回顾的会话
-|memory:full|             # 完整模式：重新扫描所有会话
-|memory:recent|           # 最近模式：仅最近 5 个会话
-|memory:session:abc123|   # 指定会话
-```
+激活语法走的是函数参数的通用解析：`|memory|` 用默认值 `all`；`|memory:full|` 按 frontmatter 的参数顺序把 `full` 传给 `scope`；`|memory scope=full|` 是等价的键值写法。四种取值的行为差别是：
 
-## 源码文件映射
+| `scope` 取值 | 行为 |
+|---------------|------|
+| `all`（默认） | 增量：跳过 `source_sessions` 已记录的会话 |
+| `full` | 全量重扫所有会话，先查重再合并 |
+| `recent` | 只处理最近 5 个会话 |
+| `session:<id>` | 只处理指定的那一个会话 |
 
-`src/memory/` 目录各文件与本文档章节的对应关系：
+**一处实现落差**：函数正文要求把新处理的会话 ID 追加进 `source_sessions`，但 `memory_update` 的参数面只有 `title` / `content` / `category` / `tags` / `relevance` 五个字段。在 v1.9.0 中 `source_sessions` 只在 `memory_write` 时被初始化为空数组，此后没有任何代码路径修改它，因此该列实际上恒为空——增量模式真正依赖的是代理每轮重新比对 `session_list` 与 `memory_list` 的结果。`rolebox memory show <id>` 会显示这一列，看到空值属于预期。
 
-| 源码文件 | 对应文档章节 | 核心职责 |
-|---------|-------------|---------|
-| `src/memory/store.ts` | [设计决策摘要](#设计决策摘要) / [全文搜索行为详解](#全文搜索行为详解) | MemoryStore 类：SQLite CRUD + FTS5 搜索 + LRU touch |
-| `src/memory/search.ts` | [全文搜索行为详解](#全文搜索行为详解) | FTS5 查询逻辑与 BM25 排序（经典全文检索相关性排序算法） |
-| `src/memory/tools.ts` | [工具参考](#工具参考) / [memory_update](#memory-update--部分更新) | 4 个工具创建函数（memory_write/recall/list/update） |
-| `src/memory/schema.ts` | [清理与淘汰机制](#清理与淘汰机制) | SQLite 表结构与 FTS5 索引定义 |
-| `src/memory/types.ts` | [设计决策摘要](#设计决策摘要) | MemoryEntry、MemorySummary、MemoryConfig 等类型 |
-| `src/hooks/system-transform.ts` | [注入机制](#注入机制) | Memory 注入路径（`system-transform.ts:87-112`）：加载 `MemoryStore` 并把 `<available_memory>` 摘要块写入系统提示 |
-| `src/prompt/builder.ts` | [注入机制](#注入机制) | `buildMemoryBlock` 生成注入摘要块（`builder.ts:145-148`） |
+## 存储与索引
 
-> 实现策略的完整 898 行原文请参阅[记忆系统实现策略文档](/04-Advanced/design-decisions/memory-strategy)。
+### 数据库与表
 
-## 设计决策摘要
+`MemoryStore.create(workspaceDir)` 先解析数据库路径 —— `.rolebox/memory.db`（`src/utils/state-paths.ts` 的 `memoryDbPath`）—— 建目录、开库、执行 `PRAGMA journal_mode = WAL` 与 `PRAGMA foreign_keys = ON`，最后跑一遍幂等的建表逻辑：`src/memory/schema.ts` 的 `ensureMemorySchema` 全部语句带 `IF NOT EXISTS`，可以反复执行。
 
-| 决策项 | 方案 |
-|--------|------|
-| 作用域 | 角色私有 + 工作区共享，两层隔离 |
-| 存储引擎 | SQLite（WAL 模式），文件位置 `.rolebox/memory.db` |
-| 全文搜索 | FTS5 + BM25 排序 |
-| 工具可用性 | 内置于所有角色（`memory_write`、`memory_recall`、`memory_list`、`memory_update`） |
-| 注入方式 | 会话开始自动注入 `<available_memory>` 摘要块（仅标题和元数据，不含全文） |
-| 注入配置 | 可在 `role.yaml` 中控制注入开关、数量上限、最低相关性级别 |
-| 容量管理 | 每作用域默认上限 500 条 + LRU 淘汰为**策略层规划，尚未落地**——当前通过 `rolebox memory clean` 手动清理实现 |
-| 合并触发 | 手动 `\|memory\|` 激活，无自动触发 |
+`memories` 表的列：
 
-::: tip 记忆系统最佳实践
-- **即时记录**：在做出架构决策或发现重要信息时立即调用 `memory_write`，不要等到合并没有灵感时再回忆
-- **适度标记**：仅将真正关键的条目标记为 `relevance="high"`，避免高频条目冲淡注入质量
-- **合理分类**：善用 `category` 字段（decision / preference / fact / lesson / note），便于后续 `memory_recall` 的精确过滤
-- **定期合并**：每隔几个会话运行一次 `|memory|`，避免未回顾的会话堆积
-:::
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `id` | TEXT PRIMARY KEY | 12 位短哈希 |
+| `scope` / `role_id` | TEXT | 作用域与归属角色 |
+| `category` / `relevance` | TEXT | 分类；相关性默认 `medium` |
+| `title` / `content` | TEXT | 标题与正文 |
+| `tags` / `source_sessions` | TEXT | JSON 字符串，读出时解析回数组 |
+| `created_at` / `updated_at` / `accessed_at` | TEXT | ISO 8601 时间 |
+| `access_count` | INTEGER DEFAULT 0 | 访问计数，淘汰判据 |
+| `session_id` | TEXT | 写入时的会话 |
 
-## 工具参考
+辅助索引四个：`(scope, role_id)` 与 `category` 服务过滤，`accessed_at` 服务「按访问时间」排序，`relevance` 服务按相关性过滤。
 
-rolebox 提供 4 个核心记忆工具，所有角色均可使用：
+### FTS5 全文索引
 
-| 工具 | 用途 | 关键参数 |
-|------|------|----------|
-| `memory_write` | 写入新记忆 | `title`, `content`, `category`, `scope`, `tags`, `relevance` |
-| `memory_recall` | 全文搜索记忆 | `query`, `scope`, `category`, `limit` |
-| `memory_list` | 浏览记忆摘要 | `scope`, `category`, `limit`, `sort` |
-| `memory_update` | 更新已有记忆 | `id`, `title?`, `content?`, `category?`, `tags?` |
+`memories_fts` 是一张 FTS5 外部内容表（external content table）：索引 `title` / `content` / `tags` 三列，`content='memories'` 与 `content_rowid='rowid'` 让它只存索引、不重复存正文。
 
-### 使用示例
+三支触发器维持同步：`AFTER INSERT` 插入索引行，`AFTER DELETE` 用 FTS5 的 `'delete'` 指令删除索引行，`AFTER UPDATE` 先删旧行再插新行。因此 `MemoryStore.update()` 不需要自己维护 FTS，删除一条记忆时索引也随之消失。
 
-写入一条架构决策：
+查询逻辑在 `src/memory/search.ts`：把查询串里的双引号翻倍转义后交给 `MATCH`，用 `INNER JOIN memories_fts ON m.rowid = memories_fts.rowid` 取回正文，`ORDER BY rank` 排序（FTS5 的 `rank` 列就是 BM25 分数），`LIMIT` 收尾；`scope` 与 `category` 作为 SQL 级 `WHERE` 条件叠加在同一句上。
 
-```
-memory_write(
-  title="数据库选型：SQLite",
-  content="在 memory 和 artifact 存储中统一使用 SQLite，原因是：1) Bun 内置 bun:sqlite，零额外依赖；2) FTS5 全文搜索优于 grep；3) WAL 模式支持并发读写。",
-  category="decision",
-  scope="workspace",
-  relevance="high"
-)
-```
+建表时没有指定分词器，所以使用 FTS5 的默认分词器 `unicode61`：英文按空格与标点切词，中文这类无分隔文本容易被当成整段 token。库层对此没有额外处理，规避方式是在查询侧把词缩短（2–6 字）或使用 `*` 前缀匹配。
 
-搜索相关记忆：
+### 双运行时驱动
 
-```
-memory_recall(query="缓存策略", scope="both", limit=5)
-```
+`src/memory/db-driver.ts` 在运行时二选一：检测到 `globalThis.Bun` 就用 `bun:sqlite` 的 `Database`，否则用 `node:sqlite` 的 `DatabaseSync`（Node 22.5 起可用）。两个模块都通过动态 `import()` 载入，这样 Node 进程不会在模块求值阶段因为静态引用 `bun:sqlite` 而崩溃。
 
-## 全文搜索行为详解
-
-rolebox 的 FTS5 全文搜索基于 SQLite 内置的 BM25 排序算法（src/memory/search.ts:44）：
-
-- **排名算法**：BM25（Okapi BM25）—— 基于词频和逆文档频率的经典信息检索模型，`ORDER BY rank` 返回相关性最高的结果
-- **精确匹配 vs 子串匹配**：FTS5 默认使用 `unicode61` 分词器，对英文按空格和标点分词、按词匹配；对中文等无分隔符语言，整段文本可能被视作单一 token，导致子串匹配不准确
-- **中文搜索建议**：查询较短的关键词片段（2-6 字），FTS5 的 `MATCH` 语法支持前缀匹配（`"缓存*"`）和短语匹配（`"JWT 认证"`）
-- **查询转义**：查询中的双引号字符会被自动转义（`"` → `""`），防止 FTS 语法错误
-- **scope/category 过滤**：FTS 结果通过 `INNER JOIN` 与主表关联，支持 `scope` 和 `category` 的 SQL 级 WHERE 过滤
-
-```sql
--- 等效 SQL（简化）
-SELECT m.* FROM memories m
-INNER JOIN memories_fts ON m.rowid = memories_fts.rowid
-WHERE memories_fts MATCH ?
-ORDER BY rank
-LIMIT ?
-```
-
-::: warning 中文搜索注意事项
-FTS5 默认 `unicode61` 分词器对中文分词效果有限。如果中文搜索未返回预期结果，建议：(1) 使用更短的查询词；(2) 尝试英文关键词+中文混合查询；(3) 用 `memory_list` 先浏览可用记忆标题，再针对搜索。
-:::
+驱动对外只暴露记忆模块真正用到的五个方法：`exec` / `run` / `query` / `transaction` / `close`。Bun 侧直接转发内建 statement；Node 侧包一层 `prepare()`，`transaction` 由驱动自己写 `BEGIN` / `COMMIT` / `ROLLBACK`。
 
 ## 注入机制
 
-会话启动时，rolebox 自动注入 `<available_memory>` XML 块到系统提示词中。注入内容仅包含摘要（ID、标题、分类、相关性、更新时间），不含完整正文，以最小化 token 消耗。
+注入发生在系统提示组装阶段，而不是写入时。链路是：
 
-注入行为可在 `role.yaml` 中配置：
+1. `system.transform` 进入 `src/hooks/system-transform.ts` 的 `handleSystemTransform`；无论当前有没有激活的函数，记忆这一段都会执行；
+2. 从角色配置读 `memory` 块，缺省值为 `{ inject: true, max_inject: 10, min_relevance: "medium", scope: "both" }`，`inject: false` 直接跳过；
+3. `MemoryStore.create(deps.dir)` 打开库，用 `store.list({ scope, limit: max_inject, minRelevance: min_relevance })` 取摘要——只查 `id` / `title` / `category` / `relevance` / `updated_at`，不读正文；
+4. `buildMemoryBlock()`（`src/prompt/builder.ts`）把摘要渲染成 `<available_memory>` 块：块首固定一行说明「Memory entries from previous sessions. Use memory_recall to search for specific memories.」，每个条目是一个 `<memory>` 元素，含 id / title / category / relevance / updated。列表为空时返回空串，调用方不推入任何内容。
 
-```yaml
-memory:
-  inject: true           # 是否注入（默认 true）
-  max_inject: 10         # 最多注入条数（默认 10）
-  min_relevance: medium  # 最低相关性级别（默认 medium）
-  scope: both            # 注入作用域：role | workspace | both
-```
+两个后果值得记进实现笔记：
 
-代理在需要完整内容时通过 `memory_recall` 工具获取 — 按需加载，节省 token。
+- 摘要块是**组装时的快照**。它读的是数据库而不是内存缓存，所以新写入的条目在下次组装时可见；但组装时机由 harness 决定，会话中途不会热更新已经发出的提示。
+- `store.list` 默认按 `updated_at DESC` 排序，`max_inject` 是硬截断——老条目会被挤出注入窗口，但它仍然可以被 `memory_recall` 搜到。
 
-## memory_update — 部分更新
+**平台差异**：这条链路并非在所有 harness 上都生效。
 
-`memory_update` 遵循部分合并（partial merge）语义——仅更新调用方提供的字段，其余字段保持不变（src/memory/tools.ts:178-184）：
+| 平台 | 注入路径 | 结果 |
+|------|----------|------|
+| opencode | `system.transform` 钩子（`src/hooks/system-transform.ts`） | 注入 `<available_memory>` |
+| Pi | Pi 系统提示适配器复用同一条流水线（`src/platform/adapters/pi/system-transform.ts`） | 注入 `<available_memory>` |
+| dsh | `system.transform` 是文档化的 no-op（`src/platform/adapters/dsh/hook-provider.ts`），会话级改走系统提示注册表（`src/platform/adapters/dsh/system-prompt.ts`） | **不注入**记忆块 |
 
-```javascript
-// 只更新标题和相关性，内容和分类保持不变
-memory_update(
-  id="auth-jwt-decision",
-  title="Auth 使用 JWT + Refresh Token（已升级至 RS256）",
-  relevance="high"
-)
+dsh 的缺席是刻意的：注册表的 `text` provider 是同步的，而 `MemoryStore.create` 是异步的，在同步 provider 里做异步读会阻塞提示组装或与写入竞态。该适配器因此只注册 `rolebox:role`（角色提示）与 `rolebox:context`（可用函数块）；spawn 时的上下文提供者（`src/dsh-plugin.ts`）同样只生成函数块。要让 dsh 也拿到记忆，前提是出现一个同步的记忆来源，或者注册表提供异步 API。
 
-// 追加标签（需先通过 memory_recall 获取现有标签再合并）
-memory_update(
-  id="auth-jwt-decision",
-  tags=["auth", "jwt", "rs256", "security"]
-)
-```
+同一个数据库还有第二个读取方：`context_assemble` 工具（`src/dispatch/query/context-assemble.ts`）按当前话题直接 `store.search()`，把命中条目的标题与正文前 200 字拼成 `### Memory Matches` 段。它与注入是两条不同的取数策略——注入按更新时间取摘要，它按话题相关性取片段。
 
-实现逻辑：
-1. 通过 `id` 读取现有记录（`store.read()`），不存在则返回提示
-2. 仅将 `title`、`content`、`category`、`tags`、`relevance` 中非 `undefined` 的字段写入更新
-3. 自动将 `updated_at` 设置为当前时间
-4. 数据库级 `AFTER UPDATE` 触发器同步更新 FTS5 索引
+## 更新与部分更新
 
-::: tip 何时使用 memory_update
-当一条现有记忆需要完善（补充细节）、修正（纠正错误信息）或升级（提高相关性级别）时，优先使用 `memory_update` 而非重新写入。这保持了 ID 不变，使 `<available_memory>` 注入的链接保持有效。
-:::
+`memory_update` 是部分合并（partial merge）：只写调用方真正给出的字段。执行顺序是：
 
-## CLI（命令行界面，Command-Line Interface）命令
+1. 按 `id` 读出现有条目；读不到直接返回 `Memory ID <id> not found — nothing updated`；
+2. 把 `title` / `content` / `category` / `tags` / `relevance` 中非 `undefined` 的字段收进一个更新对象；
+3. 交给 `MemoryStore.update()`：拼动态 `SET` 列表、把 `tags` 序列化成 JSON、**无条件**把 `updated_at` 设为当前时间，全部在一个事务里；
+4. 数据库的 `AFTER UPDATE` 触发器重建索引行。
 
-```bash
-rolebox memory list [--scope workspace|role|both] [--category <cat>] [--limit N]
-rolebox memory show <id>
-rolebox memory search <query> [--scope ...] [--limit N]
-rolebox memory delete <id>
-rolebox memory export [--format markdown|json] [--output <path>]
-rolebox memory clean [--max-age-days N] [--min-relevance low]
-rolebox memory stats
-```
+两点实现层的事实值得与直觉核对：
 
-> 各个子命令的详细说明请参见 [CLI 参考 → memory](/03-Reference/cli#memory-subcommand)。
+- `MemoryStore.update()` 的字段映射其实还覆盖 `scope`、`role_id`、`session_id`、`source_sessions`，但 `memory_update` 只暴露五个字段——这条更宽的通道目前没有调用方。
+- 「只更新 `updated_at`」有专门分支：当 `SET` 列表里只剩时间戳时走一条更短的语句，因此传一个空更新也不会报错。
+
+**平台可用性**：共享装配层 `src/platform/tool-assembly.ts` 只注册 `memory_write` / `memory_recall` / `memory_list` 三个；`memory_update` 由平台在 extraTools 里额外补上——OpenCode 见 `src/core/services/tool-service.ts`，Pi 见 `src/pi-extension.ts`。dsh 没有这个工具，在 dsh 上修正一条记忆只能重新写入。
 
 ## 清理与淘汰机制
 
-`rolebox memory clean` 命令通过 SQL 查询识别可淘汰的记忆（src/cli/commands/memory/memory-clean.ts:62-74）：
+### 淘汰判据与执行
 
-- **淘汰条件**：`access_count = 0` 且（`accessed_at IS NULL` 或最后访问时间早于 N 天前）
-- **相关性过滤**：`--min-relevance` 控制最低保留级别，`high` 仅删 `high`、`medium` 删 `high`+`medium`、`low` 删全部三级
-- **默认值**：`--max-age-days 180`（半年无访问）、`--min-relevance low`（仅删除低相关性条目）
-- **干跑模式**：默认只输出预览列表，加 `--yes`（或 `-y`）才真正执行删除
+`rolebox memory clean`（`src/cli/commands/memory/memory-clean.ts`）先用一条 SQL 选出候选：
 
-### 记忆清理工作流
+```sql
+SELECT id, title, category, relevance, accessed_at FROM memories
+WHERE access_count = 0 AND (accessed_at IS NULL OR accessed_at < ?)
+```
+
+`?` 是「今天减去 `--max-age-days` 天」（默认 180）的 ISO 时间。关键在于第一个条件：**一条记忆只要被 `memory_recall` 命中过一次，`access_count` 就不再为 0，它永远进不了候选集**。这正是 `touch()` 存在的意义——`memory_recall` 在返回结果之前对每条命中调用 `store.touch(id)`，把 `accessed_at` 刷成当前时间并让 `access_count` 加一。`memory_list` 与 `store.read()` 都不调用 `touch()`。
+
+候选再按相关性档位过滤。`--min-relevance` 的语义是「**可被删除的最低档位**」，实现是 `relevanceLevels()` 取 `[high, medium, low]` 的前缀：
+
+| `--min-relevance` | 可删除的档位 |
+|--------------------|--------------|
+| `high` | 只删 `high` |
+| `medium` | 删 `high` + `medium` |
+| `low`（默认） | 三级全删 |
+
+不带 `--yes`（或 `-y`）时是干跑，只打印候选表；带 `--yes` 时在一个事务里逐条 `DELETE`，FTS 索引由 `AFTER DELETE` 触发器同步清理。
 
 ```bash
-# 1. 查看内存统计
-rolebox memory stats
-# 输出示例：
-# Total: 47 entries
-# By scope: workspace: 32, role: 15
-# By category: decision: 8, fact: 20, lesson: 5, note: 14
-# By relevance: high: 12, medium: 25, low: 10
-
-# 2. 干跑模式——查看哪些记忆将被清理
 rolebox memory clean --max-age-days 90
-# Found 3 candidate(s) for cleanup (dry-run):
-#   (use --yes to perform deletion)
-#
-#   ID           Title                          Relevance  Last accessed
-#   ──────────────────────────────────────────────────────────────────
-#   a1b2c3d4e5f6 旧的实验笔记                    low        2026-03-15
-#   f6e5d4c3b2a1 废弃的 API 设计草稿             low        2026-04-01
+```
+```text
+应看到（干跑，不删数据）：
+Found 3 candidate(s) for cleanup (dry-run):
+  (use --yes to perform deletion)
 
-# 3. 执行清理
-rolebox memory clean --max-age-days 90 --min-relevance low --yes
-# Deleted 3 stale memory entries.
-
-# 4. 验证结果
-rolebox memory stats
-# Total: 44 entries (少了 3 条)
+  ID           Title                          Relevance  Last accessed
+  ──────────────────────────────────────────────────────────────────
+  a1b2c3d4e5f6 旧的实验笔记                    low        2026-03-15
 ```
 
-内存的按作用域容量上限（默认 500 条/作用域）属于策略层设计，当前通过 CLI 手动清理实现。自动 LRU 淘汰和 `ROLEBOX_MEMORY_MAX_ENTRIES` 环境变量支持详见[实现策略文档](/04-Advanced/design-decisions/memory-strategy)。
+示例输出，行数与内容随环境变化。没有候选时输出 `No stale memory entries to clean.`；真删后的收尾行是 `Deleted N stale memory entries.`（N 为 1 时写作 `entry`）。
 
-## 记忆 CLI Cookbook
+CLI 侧还会先定位工作区：`resolveProjectRoot()` 从当前目录向上最多 64 层寻找 `.rolebox` 目录，找不到就退回当前目录。所以 `rolebox memory clean` 作用的是**离你最近的那个 rolebox 工作区**，而不是某个全局记忆库。
 
-以下是常见的记忆管理工作流，覆盖从日常记录到定期维护的完整周期。
+### 容量管理：尚未落地的部分
 
-### 1. 日常记录 — 快速写入
+设计记录中规划过「每个作用域默认上限 500 条 + LRU 自动淘汰 + `ROLEBOX_MEMORY_MAX_ENTRIES` 环境变量」。在 v1.9.0 的实现里这三项都不存在：源码中没有容量上限常量、没有读取该环境变量、`MemoryStore` 也没有任何写入时的容量检查。唯一减少条目数量的路径就是上面这条 `rolebox memory clean`；规划细节与理由见[记忆策略（设计决策）](/04-Advanced/design-decisions/memory-strategy)。
 
-在开发过程中遇到关键决策或发现时，立即记录：
+## 与 references 的分工
 
-```bash
-memory_write(
-  title="模块拆分：将支付模块拆为 4 个子模块",
-  content="拆分方案：PaymentProcessor（核心）+ FraudDetection（风控）+ RefundManager（退款）+ SubscriptionManager（订阅）。依据：单一职责，便于独立测试。",
-  category="decision",
-  scope="workspace",
-  relevance="high",
-)
-```
+记忆（Memory）和引用文档（References）都会进入系统提示，但负责的知识类型不同：引用是随代码库版本走的静态文档，记忆是运行时产生、可被淘汰的动态记录。
 
-### 2. 批量回顾 — 会话合并
+| 维度 | Memory | References |
+|------|--------|------------|
+| 存储 | `.rolebox/memory.db`（SQLite 运行时数据） | `references/` 目录下的 Markdown |
+| 写入者 | 代理运行时调用工具 | 开发者手写，随仓库提交 |
+| 检索 | FTS5 全文搜索（BM25 排序） | 按声明注入，按文件路径引用 |
+| 注入形态 | `<available_memory>` 摘要，正文按需召回 | `<available_references>` 的元数据条目 |
+| 生命周期 | 可被 `memory clean` 淘汰 | 随版本迭代，除非删除文件 |
 
-完成一个阶段的开发后，运行合并回顾将多场会话中的经验提炼为结构化记忆：
+选择上可以按两条线判断：内容**动态变化、写操作频繁**（决策、教训、临时事实）放进记忆；内容**稳定、需要评审与版本追溯**（接口规范、架构约定）写进引用。两者可以互相迁移——一条被反复验证的记忆值得提升为引用文档，而引用文档里的关键结论也可以在合并回顾时落成一条记忆，让它在会话中被自动看到。
 
-```
-|memory|            # 增量模式：仅处理未回顾的会话
-|memory:full|       # 完整重扫：去重 + 合并
-|memory:recent|     # 最近 5 个会话
-```
+## 排错
 
-合并回顾会自动检查已有记忆的 `source_sessions`，跳过已处理过的会话。
+### 记忆没有出现在注入块里
 
-### 3. 搜索 → 导出 → 清理 循环
-
-这是最常见的维护工作流，建议在项目里程碑前后执行：
-
-```bash
-# 第一步：搜索——找到需要复用的记忆
-rolebox memory search "缓存策略"
-rolebox memory search "架构决策" --scope workspace --limit 20
-
-# 第二步：导出——备份或分享给团队
-rolebox memory export --format markdown --output docs/adrs/memory-backup.md
-rolebox memory export --format json --output exports/memories.json
-
-# 第三步：统计——了解记忆库的整体状况
-rolebox memory stats
-
-# 第四步：清理——干跑预览后再执行
-rolebox memory clean --max-age-days 60 --min-relevance low
-rolebox memory clean --max-age-days 60 --yes
-
-# 第五步：验证——确认清理结果
-rolebox memory stats
-```
-
-### 4. 跨角色知识共享
-
-当不同角色需要共享知识时，写入 `scope="workspace"` 的记忆会被所有角色在会话启动时注入：
-
-```bash
-memory_write(
-  title="项目测试策略：单元测试覆盖率目标 80%",
-  content="关键模块（支付、用户认证）需 ≥ 90%；工具类允许 60%。使用 vitest + playwright。",
-  category="fact",
-  scope="workspace",
-  relevance="high",
-)
-```
-
-角色私有记忆（`scope="role"`）仅对该角色可见，适合存储角色专用的偏好或内部约定。
-
-### 5. 标签分类体系
-
-为记忆添加一致的标签可以大幅提升检索效率。建议的标签分类：
-
-| 标签类别 | 示例标签 |
-|---------|---------|
-| 模块 | `auth`, `payment`, `notification` |
-| 技术栈 | `sqlite`, `react`, `bun` |
-| 关注点 | `security`, `performance`, `testing` |
-| 阶段 | `design`, `migration`, `bugfix` |
-
-```bash
-memory_write(
-  title="API 鉴权方案",
-  content="JWT + Refresh Token，access_token 有效期 15 分钟...",
-  category="decision",
-  tags=["auth", "jwt", "security", "design"],
-  relevance="high",
-)
-```
-
-## 何时使用 Memory vs References
-
-记忆系统 (Memory) 和参考文档 (References) 是 rolebox 两种互补的知识管理机制，各有适用场景：
-
-| 维度 | Memory（记忆） | References（参考） |
-|------|---------------|-------------------|
-| **存储位置** | `.rolebox/memory.db`（SQLite 运行时数据） | `references/` 目录（Markdown 源码） |
-| **持久性** | 运行时持久化，可被清理/淘汰 | Git 版本控制，永久保留 |
-| **写入方式** | 代理在运行时通过 `memory_write` 工具写入 | 开发者手动编写 Markdown |
-| **搜索方式** | FTS5 全文搜索（BM25 排名） | 按文件路径/名称引用 |
-| **注入方式** | 自动注入摘要 `<available_memory>`，按需加载全文 | 按参考声明注入 `<available_references>` |
-| **适用范围** | 动态知识：决策记录、教训、偏好、临时事实 | 静态知识：API（应用程序接口，Application Programming Interface）文档、架构规范、团队约定 |
-| **生命周期** | 会话级 → 项目级，可按访问频率淘汰 | 随代码库版本迭代 |
-| **典型用例** | "为什么当时选了方案 A？""这个 bug 以前遇到过吗？" | "这个 API 的签名是什么？""项目的编码规范是什么？" |
-| **内容审查** | 自动写入，可能有噪声 | 人工编写，质量可控 |
-
-### 选择指南
-
-- **写操作频繁、内容动态变化** → Memory（决策、配置选择、临时发现）
-- **内容稳定、需要多人审阅** → References（API 设计规范、架构决策记录、团队约定）
-- **跨会话知识复用** → Memory（代理会在后续会话中自动看到摘要）
-- **跨角色共享** → 均可：Memory 用 `scope="workspace"`，References 放入公共 `references/`
-- **需要 Git 历史追踪** → References（运行时数据不应进入版本控制）
-
-两者可以配合使用：当一条记忆经过验证、确认具有长期价值后，可以从 Memory 迁移为正式的 References 文档。反之，References 中的关键知识点也可以通过 `|memory|` 合并回顾写入 Memory，提高代理在会话中的检索效率。
-
-## 常见问题排查
-
-### 记忆未出现在 `<available_memory>` 中
-
-- 确认 `role.yaml` 中 `memory.inject` 未被设为 `false`（默认为 `true`）
-- 新写入的记忆只在下一次会话启动时才会被注入——当前会话不会动态更新摘要块
-- 如果某条记忆的相关性为 `low` 且 `min_relevance` 设为 `medium`，该条会被跳过
+按可能性从高到低排查：`role.yaml` 的 `memory.inject` 是否为 `false`；条目的 `relevance` 是否低于 `min_relevance`（默认 `medium`，即 `low` 条目被跳过）；`scope` 是否与配置的注入作用域相符；条目是否被 `max_inject` 挤出窗口——该截断按 `updated_at DESC` 取前 N 条，写入较晚的记忆会挤掉较早的。另外 dsh 上不会注入，见前文的平台差异表。
 
 ### 搜索返回空结果
 
-```
-memory_recall(query="缓存策略", scope="both", limit=5)
-# 返回: No memories found matching "缓存策略".
-```
-
-可能原因：
-
-- **中文分词限制**：FTS5 默认 `unicode61` 分词器对中文支持有限，尝试拆分为更短的查询词
-- **拼写不匹配**：FTS5 不支持模糊匹配或通配符前缀（除非显式指定 `*`），精确拼写必填
-- **作用域过滤**：如果记忆是 `scope="role"` 而当前查询 `scope="workspace"`，则不会命中。使用 `scope="both"` 覆盖全部作用域
+四条常见原因：中文分词限制（缩短查询词或改用前缀匹配）；查询串里的双引号被当成 FTS 语法的一部分（内部会转义成 `""`，但不是模糊匹配）；`scope` 过滤不匹配（角色私有记忆在 `scope="workspace"` 的查询下不会命中，用 `both` 覆盖）；拼写要求精确——FTS5 不做模糊匹配，除非显式写 `*`。
 
 ### 记忆过时
 
-如果 `rolebox memory list` 中某条记忆的 `updated_at` 明显过时（如数月前的决策），建议：
+先用 `memory_recall` 取全文判断是否还有效，再决定修正还是重写。修正用 `memory_update`（OpenCode / Pi），它保持 `id` 不变，注入块里的条目因此不会断链；如果所在平台没有这个工具，只能 `memory_delete` 旧条目后重新 `memory_write`。
 
-1. 用 `memory_recall` 获取完整内容评估相关性
-2. 用 `memory_update` 补充最新信息并更新 `relevance`
-3. 或用 `memory_write` 写入新版并删除旧版
+## 实现模块
 
-::: tip 深入阅读
-完整的记忆系统设计决策、存储架构、淘汰策略、环境变量和实现计划请参见[记忆系统实现策略文档](/04-Advanced/design-decisions/memory-strategy)。本文档为浓缩版用户指南，不重复 800+ 行的策略原文。
-:::
+下面这些模块构成记忆子系统；行号不作为文档的一部分，需要定位实现时在仓库中检索符号。
 
-> **免责声明**
->
-> 本文档基于内部实现策略文档整理。具体行为可能因版本变化而不同，以实际源码为准。实现策略原文参见[记忆系统实现策略文档](/04-Advanced/design-decisions/memory-strategy)，仅供内部参考。
+| 模块 | 职责 |
+|------|------|
+| `src/memory/store.ts` | `MemoryStore`：打开/关闭数据库、CRUD、`list` / `stats` / `touch` |
+| `src/memory/schema.ts` | 表、FTS5 虚拟表、三支同步触发器与四个索引的定义 |
+| `src/memory/search.ts` | FTS5 `MATCH` 查询、转义、`rank` 排序与作用域/分类过滤 |
+| `src/memory/tools.ts` | `memory_write` / `memory_recall` / `memory_list` / `memory_update` 四个工具 |
+| `src/memory/db-driver.ts` | Bun / Node 双运行时 SQLite 驱动 |
+| `src/memory/types.ts` | `MemoryEntry` / `MemorySummary` / `MemoryConfig` 类型 |
+| `src/utils/state-paths.ts` | `.rolebox/memory.db` 路径与 12 位短哈希 |
+| `src/hooks/system-transform.ts` | 注入触发点：读配置、取摘要、推入系统提示 |
+| `src/prompt/builder.ts` | `buildMemoryBlock`：`<available_memory>` 块的渲染 |
+| `src/cli/commands/memory/memory-clean.ts` | `clean` 子命令的候选 SQL、档位过滤与干跑 |
+| `functions/memory.md` | 合并回顾内置函数的指令正文 |
 
-## 下一步
+## 备注
 
-- [会话工具](/04-Advanced/session-tools) — 10 工具会话管理套件
-- [CLI 使用](/03-Reference/cli) — 命令行工具完整参考
+> 自 v0.20.0 起，rolebox 提供工作区内的 SQLite 持久记忆与 `rolebox memory` 子命令；本页描述的实现在 v1.9.0 上核对。

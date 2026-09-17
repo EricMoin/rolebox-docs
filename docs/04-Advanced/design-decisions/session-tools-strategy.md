@@ -1,18 +1,19 @@
 ---
 title: 会话工具套件 — 实现策略（历史记录）
 description: 10 工具会话管理套件的实现策略文档 — 架构概览、工具规格、状态管理、实现计划与测试策略
+search: false
 ---
 
-::: warning 免责声明
-本文档为 rolebox 内部实现策略的历史记录，基于 2026-07-03 的设计决策编写。**内容可能已过时**，具体行为以实际源码和当前文档为准。仅供内部参考和架构回溯。
+::: warning 历史记录（归档）— 非当前 API 参考
+**本文档是 2026-07-03 的设计历史记录，不是当前 API 参考。** 文中出现的所有 `src/` 路径、工具签名与默认值都是当时的设计内容，**可能与当前源码不一致**（部分文件已不存在或已重组），请勿据此编写代码或核对接口。
 
-相关用户文档请参阅：[会话工具](/04-Advanced/session-tools)。
+当前实现与用户文档请以[会话工具](/04-Advanced/session-tools)为准；本文档仅用于架构回溯与决策溯源。
 :::
 
 ::: tip 快速参考
-以下是规划工具名与实际注册工具名的映射表。请在会话工具用户文档中查阅各工具的详细参数和使用示例。
+以下是规划工具名与实际注册工具名的映射表（**归档记录**：末列为当时规划的实现路径，可能与当前源码不一致）。请在[会话工具](/04-Advanced/session-tools)中查阅各工具的详细参数和使用示例。
 
-| 规划工具名 | 实际工具名 | 状态 | 源码位置 |
+| 规划工具名 | 实际工具名 | 状态 | 当时规划路径 |
 |-----------|-----------|------|---------|
 | `session_list` | `session_list` | ✅ 已实现 | `src/session/session-browse-tools.ts` |
 | `session_read` | `session_read` | ✅ 已实现 | `src/session/session-inspect-tools.ts` |
@@ -27,7 +28,7 @@ description: 10 工具会话管理套件的实现策略文档 — 架构概览�
 | `session_timeline` | — | ⏳ 推迟 | — |
 | `session_link` | — | ⏳ 推迟 | — |
 
-> 实际工具注册见 `src/platform/tool-assembly.ts:107-112`（`session_list`/`session_search`/`session_read`/`session_info`/`session_diff`/`session_fork`）。推迟的工具将在未来版本中评估。
+> 实际工具注册见 `src/platform/tool-assembly.ts`（`session_list`/`session_search`/`session_read`/`session_info`/`session_diff`/`session_fork`）。推迟的工具将在未来版本中评估。
 :::
 
 # Session Tools Suite — Implementation Strategy
@@ -445,7 +446,7 @@ Markdown format: `# {title}` header, metadata block, `## Messages` section with 
 | 工具创建模式 | `create*Tool(client)` | ✅ 按计划实现 | 使用 `defineTool`（`src/platform/ports/tool-factory.ts`） |
 | SDK API 模式 | 扁平参数 + RequestResult 解包 | ✅ 按计划实现 | SessionClientWrapper 封装 |
 
-> **注意：** 实际工具注册见 `src/platform/tool-assembly.ts:107-112`。推迟的工具未来可能以不同形式实现。
+> **注意：** 实际工具注册见 `src/platform/tool-assembly.ts`。推迟的工具未来可能以不同形式实现。
 
 ## 8. Test Plan
 
@@ -485,7 +486,7 @@ None required. All configuration is via tool parameters.
 
 ## 11. Acceptance Criteria
 
-1. All 10 tools registered via `buildCanonicalTools` in `src/platform/tool-assembly.ts`（实际注册 6 个会话工具：`src/platform/tool-assembly.ts:107-112`）
+1. All 10 tools registered via `buildCanonicalTools` in `src/platform/tool-assembly.ts`（实际注册 6 个会话工具）
 2. `tsc --noEmit` passes with zero errors
 3. `bun test tests/session/` passes all 5 test files (minimum 40+ test cases)
 4. `bun test tests/dispatch/` and `bun test tests/plugin-hooks.test.ts` pass with no regressions

@@ -1,230 +1,46 @@
 ---
-title: 快速入门
-description: 用户快速入门 — 安装、创建角色、使用场景；以及贡献者开发指南
+title: 教程总览与学习路径
+description: rolebox 教程入口：四条学习路径、七章教程地图，以及动手前的准备。
 ---
 
-# 快速入门
+# 教程总览与学习路径（Getting Started）
 
-> **相关文档：** [快速概览](/01-Overview/quick-start) — 30秒快速体验 | [创建角色](/02-Guide/create-a-role) — 角色创建实战指南 | [CLI（命令行界面，Command-Line Interface）使用](/03-Reference/cli) — 命令行工具参考 | [目录结构](/01-Overview/directory-structure) — 项目文件组织
+rolebox 把一个通用的 AI 编码助手变成你用 YAML 定义的团队：每个角色带自己的提示词、技能与函数，多代理流程由**图执行引擎（graph execution engine，运行时按节点与边推进工作流的调度器）**编排。这一页帮你决定从哪条路径进入，并给出七章教程的地图。
 
-rolebox 是一个 opencode 插件，可将一个 AI 编码助手转变为一支专业团队。定义角色、函数、技能和协作图，全部使用 YAML 配置，无需编写代码。
+## 四条学习路径
 
-## 用户快速入门
+| 你的目标 | 从这里开始 | 读完你会 |
+|---|---|---|
+| 只想用现成角色 | [三步速查](/01-Overview/quick-start) → [注册中心](/03-Reference/registry) | 装好插件，把一个角色跑起来 |
+| 想写自己的角色 | [教程 01 安装并跑通第一个角色](/02-Guide/tutorial/01-install) → [创建角色](/02-Guide/create-a-role) | 会写 PROMPT、技能、引用文档与函数 |
+| 想编排多代理 | [教程 04 把角色变成团队](/02-Guide/tutorial/04-team) → [图工作流](/02-Guide/graph-workflows) | 用图工具搭出一条带审批门的流水线 |
+| 想贡献源码 | [开发环境搭建](/05-Contributing/development-setup) → [贡献指南](/05-Contributing/contributing) | 本地构建、跑测试、提交改动 |
 
-在 30 秒内安装 rolebox 并创建你的第一个角色：
+## 教程地图
 
-```bash
-# 安装 rolebox 插件
-cd ~/.config/opencode && npm install rolebox
-```
+七章走完，你会得到一个能真正干活的代码评审团队：父角色 `code-reviewer`，加上 `coder`、`reviewer`、`doc-writer` 三个子代理，最后由图引擎串成「实现 → 评审 → 定稿」的流水线。每一章都以「读者输入什么 / 应该看到什么」组织，命令都可以直接复制。
 
-在 `opencode.jsonc` 中添加插件声明：
+| 章 | 你会做什么 | 完成后你拥有 |
+|---|---|---|
+| [01 安装并跑通第一个角色](/02-Guide/tutorial/01-install) | 安装 rolebox，创建 `code-reviewer`，在 harness 里对话 | 一个能跑起来的角色 |
+| [02 让角色懂你的项目](/02-Guide/tutorial/02-first-role) | 写 `PROMPT.md`，加一个技能与一份引用文档 | 懂你项目约定的角色 |
+| [03 用函数改变行为](/02-Guide/tutorial/03-functions) | 激活内置函数，再写一个自定义函数 | 能切换工作模式的角色 |
+| [04 把角色变成团队](/02-Guide/tutorial/04-team) | 在 `role.yaml` 里声明三个子代理 | 一个父子代理团队 |
+| [05 用图引擎编排团队](/02-Guide/tutorial/05-graph) | 用 `graph_*` 工具建图并运行 | 一条自动流水线 |
+| [06 加上审批门与有界循环](/02-Guide/tutorial/06-approval-and-loop) | 加 `needs_approval` 与 `max_traversals` | 有人工闸门、不会失控的流水线 |
+| [07 让代理记住你](/02-Guide/tutorial/07-memory) | 用 `rolebox memory` 观察记忆库 | 跨会话记得你决策的代理 |
 
-```jsonc
-{
-  "plugin": ["rolebox"]
-}
-```
+## 前置条件
 
-**创建你的第一个角色：**
+- **一个 harness**：opencode、pi 或 dsh。教程主线走 opencode，另外两个的差异只在安装命令与目录，见[平台与 Harness](/01-Overview/platform-harnesses)。
+- **Node.js 与 npm**：rolebox 以 npm 包发布，opencode 与 dsh 的安装都走 npm。
+- **一个可以随意改动的练习目录**：教程在 `~/rolebox-lab` 下建角色，不必碰你现有的项目。
+- **不需要**预先了解图引擎或函数系统：术语在首次出现处就地解释，全站定义表见[术语表](/06-Appendix/glossary)。
 
-```bash
-cd ~/.config/opencode/rolebox   # 或任何你想放置角色的目录
-rolebox init my-agent -y
-```
+## 贡献 rolebox 源码
 
-`rolebox init` 在当前工作目录下创建 `./my-agent/` 角色目录（`src/cli/commands/init.ts:50`）。随后部署到 opencode：
-
-```bash
-rolebox sync opencode
-```
-
-重启 opencode 后，从代理列表中选择 `my-agent` 即可开始使用。
-
-**安装 Emperor 编排器**（可选，用于多代理协作。编排器是顶层 AI 编排角色：把任务拆成计划、分派给专业子代理、再验证结果，它自己不写代码）：
-
-```bash
-rolebox install emperor
-```
-
-安装成功后，你的角色目录结构如下（`rolebox init` 生成）：
-
-```
-./my-agent/
-├── role.yaml           # 角色配置（名称、技能、函数等）
-├── functions/          # 函数定义
-├── skills/             # 技能定义
-└── references/         # 引用文档
-```
-
-关于角色配置的更多信息，参见[创建角色](/02-Guide/create-a-role)。关于函数和技能的编写规范，参见[编写函数](/02-Guide/writing-functions)和[编写技能](/02-Guide/authoring-skills)。
-
-### 选择正确模板
-
-`rolebox init` 提供了四种内置模板（`src/cli/templates/index.ts:31-35`），覆盖从简单单角色到多代理协作的常见场景：
-
-| 模板 | 适用场景 | 何时选择 |
-|------|----------|----------|
-| `minimal` | 简单单角色，仅需 YAML 配置与提示词文件 | 快速原型、个人工具角色、无需子代理或技能的独立任务 |
-| `standard` | 标准角色，附带 functions/、skills/、references/ 目录 | 多数场景的默认选择，为后续扩展预留完整目录结构 |
-| `subagents` | 父角色 + 子代理，通过 `task()` 派发任务 | 需要分工协作（如研究 → 写作 → 审校），子代理各有专用提示词 |
-| `collaboration` | 多代理协作图，具备内置拓扑（即协作图的预设结构模式：pipeline 串行 / review-loop 循环 / star 并行） | 需要结构化工作流编排，代理间有明确的传递顺序和循环规则 |
-
-选择策略：以 `standard` 作为起点，按需逐步升级；当角色需要拆分任务时改为 `subagents`；当需要自动化工作流路由时改为 `collaboration`。
-
-## 贡献者指南
-
-本指南面向希望为 rolebox 贡献代码的开发者。rolebox 是一个基于 Bun 和 TypeScript 的 opencode 插件，提供 AI 代理角色定义、调度系统和多代理协作能力。
-
-### 前提条件
-
-| 依赖 | 最低版本 | 验证命令 |
-|------|----------|----------|
-| [Bun](https://bun.sh) | 1.1.x | `bun --version` |
-| [Node.js](https://nodejs.org) | 20.x | `node --version` |
-| [TypeScript](https://www.typescriptlang.org) | 5.7+ | `tsc --version` |
-
-::: tip
-rolebox 使用 Bun 作为运行时和包管理器。如果尚未安装 Bun，请运行 `curl -fsSL https://bun.sh/install | bash`。
-:::
-
-### 克隆与安装
-
-```bash
-git clone https://github.com/EricMoin/rolebox.git
-cd rolebox
-bun install
-```
-
-`bun install` 会安装所有依赖（包括 `peerDependencies` 中的可选包）。核心依赖包括 `js-yaml`、`fast-glob`、`tslog`；可选依赖包括 `playwright`、`@opentui/core`、`solid-js` 等（`package.json:62-83`）。
-
-### 构建
-
-```bash
-bun run build          # 执行 tsc 编译 + TUI 构建
-bun run build:tui      # 仅构建 TUI 子系统 (scripts/build-tui.ts)
-bun run typecheck      # 仅类型检查 (tsc --noEmit)，不含输出
-```
-
-`build` 脚本定义于 `package.json:36`，先后执行 `tsc` 和 `bun run build:tui`。TUI（终端用户界面，Terminal User Interface）构建脚本位于 `scripts/build-tui.ts`。
-
-### 运行测试
-
-```bash
-bun test               # 运行所有测试
-bun test:tui           # 仅运行 TUI 测试 (tests/tui/)
-```
-
-rolebox 使用 Bun 内置的测试运行器。测试文件位于 `tests/` 目录下，覆盖 20 多个子目录，共 63+ 个测试文件。
-
-### 本地链接与调试
-
-要在本地 opencode 开发环境中测试 rolebox 变更：
-
-```bash
-# 在 rolebox 项目目录中构建
-bun run build
-
-# 创建一个指向本地构建的链接
-# opencode 从 ~/.config/opencode/ 加载插件
-# 可以通过符号链接或直接复制 dist/ 目录进行测试
-```
-
-#### VS Code 调试设置
-
-在 `.vscode/launch.json` 中添加以下配置以调试 rolebox 的 TypeScript 源码：
-
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Debug rolebox CLI",
-      "runtimeExecutable": "bun",
-      "args": ["run", "src/cli/main.ts"],
-      "cwd": "${workspaceFolder}",
-      "sourceMaps": true
-    }
-  ]
-}
-```
-
-#### 推荐 IDE 插件
-
-| 插件 | 用途 |
-|------|------|
-| [TypeScript](https://code.visualstudio.com/docs/languages/typescript) | 类型检查与导航 |
-| [Edge](https://marketplace.visualstudio.com/items?itemName=EditorSyntax.Edge) | 配置文件的语法高亮 |
-| [YAML](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml) | role.yaml 补全与校验 |
-
-### 项目结构
-
-```
-rolebox/
-├── src/                  # 源码
-│   ├── core/             # 插件核心：plugin-core.ts, event-bus, service-supervisor
-│   ├── function/         # 函数系统：parser, state-machine, observe, continuation
-│   ├── hooks/            # Hook 系统：chat-message, event-handler, custom hook registry
-│   ├── dispatch/         # 调度系统：tools, concurrency, budget, checkpoint
-│   ├── resolver/         # 解析器：role-loader, frontmatter, env-resolver, reference-resolver
-│   ├── loader/           # 加载层：role-loader, subagents
-│   ├── extensions/       # 扩展系统：extension-point, loader, conditions, capabilities
-│   ├── recovery/         # 恢复引擎：retry, fallback, truncate, compaction 策略
-│   ├── graph/            # 协作图：templates, validator, termination
-│   ├── notifications/    # 通知系统：email, slack, webhook channels
-│   ├── signal/           # 信号系统：signal-ledger, signal-tool
-│   ├── session/          # 会话工具：analytics, export, search
-│   ├── memory/           # 记忆存储
-│   ├── loop/             # 循环协调器
-│   ├── tui/              # 终端 UI 组件
-│   ├── web/              # 网络工具：web-fetch, web-search, browser-detect
-│   ├── lsp/              # LSP 客户端管理器
-│   └── cli/              # CLI 入口
-├── functions/            # 内置函数定义 (plan.md, execute.md, loop.md)
-├── examples/             # 角色示例 (code-reviewer, team-lead, tech-writer)
-├── tests/                # 测试文件
-└── docs/                 # 源文档
-```
-
-### 发布流程
-
-1. 更新 `package.json` 中的版本号
-2. 更新 `CHANGELOG.md`
-3. 执行 `bun run build` 确认构建通过
-4. 执行 `bun test` 确认所有测试通过
-5. 发布 npm 包：`npm publish`
-
-### 快速参考
-
-```bash
-# 常用开发命令
-bun install              # 安装依赖 (package.json:62-83)
-bun run build            # 完整构建 (package.json:36)
-bun run typecheck        # 类型检查 (package.json:39)
-bun test                 # 单元测试 (package.json:40)
-bun test:tui             # TUI 测试 (package.json:41)
-```
-
-### 开发速查表
-
-| 命令 | 作用 |
-|------|------|
-| `bun install` | 安装所有依赖（包括 peerDependencies 中的可选包） |
-| `bun run build` | 完整构建：执行 `tsc` 编译 + TUI 构建 |
-| `bun run build:tui` | 仅构建 TUI 子系统（`scripts/build-tui.ts`） |
-| `bun run typecheck` | 仅类型检查，不产生输出文件（`tsc --noEmit`） |
-| `bun test` | 运行所有测试（Bun 内置测试运行器） |
-| `bun test:tui` | 仅运行 TUI 测试（`tests/tui/`） |
-| `bun run docs:dev` | 启动文档本地开发服务器（VitePress） |
-| `bun run docs:build` | 构建生产文档站点 |
-| `bun run docs:preview` | 预览已构建的文档站点 |
-
-以上脚本定义于 `package.json:35-46`。开发时最常用的组合：`bun run build` 确保代码可编译，`bun test` 确保回归通过。
+本页原先附带的贡献者指南（前提条件、克隆、构建、测试、调试）已整体移交[开发环境搭建](/05-Contributing/development-setup)；贡献流程、提交信息规范与发布流程见[贡献指南](/05-Contributing/contributing)。
 
 ## 下一步
 
-- [创建角色](/02-Guide/create-a-role) — 编写完整的 `role.yaml` 配置
-- [目录结构](/01-Overview/directory-structure) — 了解项目文件组织
-- [CLI 使用](/03-Reference/cli) — 命令行工具完整参考
+从[教程 01 安装并跑通第一个角色](/02-Guide/tutorial/01-install)开始。只有五分钟？先走[三步速查](/01-Overview/quick-start)。

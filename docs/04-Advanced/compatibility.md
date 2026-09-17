@@ -1,232 +1,180 @@
 ---
 title: 兼容性
-description: rolebox 与其他工具和框架的兼容性说明
+description: rolebox 与 opencode / pi / dsh 的兼容性参考——平台能力矩阵、工具面、harness 版本约束、功能矩阵、运行时依赖与已知边界
 ---
 
-# 兼容性
+# 兼容性（Compatibility）
 
-rolebox 设计为与现有 opencode 生态协同工作，不做破坏性变更。
+本页回答「这个功能在我用的 harness 上能不能用、需要什么版本」。内容按维度组织：平台能力开关、工具面、harness 版本约束、功能引入版本、运行时依赖、操作系统支持与已知兼容边界。安装命令与目录布局见[平台与 Harness](/01-Overview/platform-harnesses)；破坏性变更与升级步骤见[迁移对照](/06-Appendix/migration)。
 
-> **相关文档：** [快速入门](/02-Guide/getting-started) — 安装与配置指南 | [已知限制](/03-Reference/limitations) — 当前版本的功能边界
+> 相关：[平台与 Harness](/01-Overview/platform-harnesses)｜[已知限制](/03-Reference/limitations)｜[CLI 参考](/03-Reference/cli)
 
-## 与 oh-my-openagent 共存
+## 快速核对
 
-rolebox 与 [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) (omo) 可以同时运行，互不冲突：
+`rolebox status` 按平台注册表逐个报告 harness 的集成状态与同步落点，是核对本机兼容性的第一条命令：
 
-- rolebox 角色出现在 opencode 代理列表中，与 omo 代理并列
-- rolebox 技能可通过 opencode 的 `skill` 工具发现和加载
-- 4 个同名会话工具（`session_list`、`session_read`、`session_search`、`session_info`）为增强版但向后兼容
-- 其余 6 个会话工具使用 `session_` 前缀命名空间，不会与任何其他工具冲突
+```bash
+rolebox status
+```
 
-## opencode 版本兼容性
+```text
+应看到（示例输出，随环境略有差异）：
+Rolebox v1.9.0
+  Configuration
+    Config               <rolebox 配置目录>/config.json
+    Registries           <注册中心列表>
+  Installed Roles
+    ✓ <角色名>  <版本>  (<注册中心>)  → synced
+  OpenCode Integration
+    Plugin               ✓ registered
+    Sync target          ~/.config/opencode/rolebox
+  pi Integration (not detected)
+    Sync target          ~/.pi/agent/rolebox
+  dsh Integration (not detected)
+    Sync target          ~/.dsh/rolebox
+```
 
-| rolebox 版本 | opencode 最低版本 | 说明 |
-|-------------|-------------------|------|
-| v0.17.x | ≥1.3.0 | 完整功能支持（记忆系统、会话工具、Hashline 编辑） |
-| v0.16.x | ≥1.2.0 | 核心功能（角色调度、技能、函数） |
-| v0.15.x | ≥1.0.0 | 基本角色系统 |
+只有 opencode 能报告「已注册/未注册」；pi 与 dsh 没有 rolebox 自己拥有的单一清单文件，因此只报告同步落点。
 
-rolebox 通过 `@opencode-ai/plugin` SDK 与 opencode 通信，插件接口的向后兼容性由 opencode 团队维护。
+## 平台能力矩阵（Platform Capabilities）
 
-## 功能兼容性矩阵
+rolebox 用一组**能力开关（PlatformCapabilities，宿主声明自己支持哪些操作的布尔集合）**描述宿主差异，同一份核心代码据此优雅降级，而不是为每个 harness 分叉逻辑。
 
-以下矩阵映射 rolebox 各版本引入的主要功能领域及其对应的 opencode 版本要求。版本阈值来源于 [CHANGELOG](https://github.com/EricMoin/rolebox/blob/main/CHANGELOG.md) 和 `package.json` 中的引擎声明。
+| 能力开关 | opencode | pi | dsh | 含义 |
+|---|---|---|---|---|
+| `hasBackgroundTasks` | ✅ | ✅ | ❌ | 后台/异步任务调度 |
+| `hasSessionFork` | ✅ | ❌ | ✅ | 会话分叉/分支 |
+| `hasSessionCreate` | ✅ | ❌ | ✅ | 新建会话 |
+| `hasSessionAbort` | ✅ | ✅ | ❌ | 中止会话 |
+| `hasAgentFileSync` | ✅ | ❌ | ❌ | agent 文件注册 |
+| `hasMultiStepTools` | ✅ | ✅ | ✅ | 多步工具执行 |
+| `hasEventStream` | ✅ | ✅ | ✅ | 事件流 |
+| `hasSessionStatus` | ✅ | ✅ | ✅ | 会话状态轮询 |
+| `hasRoleSwitch` | ❌ | ✅ | ✅ | 会话内切换活动角色 |
 
-| 功能领域 | 引入版本 | opencode 要求 | 关键依赖 |
-|---------|---------|-------------|---------|
-| 角色 YAML 系统 | v0.1.0 | ≥1.0.0 | — |
-| Functions 函数系统 (plan/execute) | v0.2.0 | ≥1.0.0 | — |
-| CLI（命令行界面，Command-Line Interface）工具链 (init/sync/search/list/update/registry) | v0.4.0 | ≥1.0.0 | — |
-| 子代理系统 (dispatch/output/cancel) | v0.5.1 | ≥1.0.0 | — |
-| References 与 Collaboration Graph | v0.6.0 | ≥1.0.0 | — |
-| Dispatch 调度引擎 (事件驱动、并发隔离、持久化) | v0.10.0 | ≥1.0.0 | — |
-| Monitor 监控面板 | v0.11.0 | ≥1.0.0 | — |
-| Loop 循环迭代系统 | v0.14.0 | ≥1.0.0 | — |
-| LSP（语言服务器协议，Language Server Protocol）语言服务器集成 (30+ 工具) | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
-| 会话管理 (session_list/read/search/info/diff/fork) | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
-| Hashline 内容哈希编辑 | v0.17.0 | ≥1.3.0 | `@opencode-ai/plugin` SDK ≥1.3.0 |
-| 模型重复预防 | v0.18.0 | ≥1.3.0 | — |
-| 扩展系统与自定义 Hook | v0.19.0 | ≥1.3.0 | — |
-| 错误恢复框架 (7+ 策略) | v0.19.0 | ≥1.3.0 | — |
-| 通知管理器 (多通道、静默时段) | v0.19.0 | ≥1.3.0 | — |
-| 持久记忆系统 (SQLite + FTS5（SQLite 内置全文搜索扩展，Full-Text Search version 5）) | v0.20.0 | ≥1.3.0 | **Bun** (bun:sqlite) |
-| 微内核架构与热重载 | v0.20.0 | ≥1.3.0 | — |
-| Token/成本预算管理 | v0.20.0 | ≥1.3.0 | — |
-| TUI（终端用户界面，Terminal User Interface）仪表板 (rolebox monitor) | v0.20.0 | ≥1.3.0 | Solid.js + OpenTU |
-| 崩溃恢复 (降级启动) | v0.21.0 | ≥1.3.0 | — |
-| Asset 工具套件 (search/inspect/validate) | v0.21.0 | ≥1.3.0 | — |
-| Context Assembly 跨域搜索 | v0.21.0 | ≥1.3.0 | — |
-| web_fetch / web_read (多后端渲染) | v0.22.0 | ≥1.3.0 | Playwright / Crawlee (可选) |
-| Signal 带外控制信号（不嵌入文本内容、独立传递的控制信令） | v0.22.0 | ≥1.3.0 | — |
-| Dispatch 检查点（子代理执行期间保存的进度快照）与进度报告 | v0.23.0 | ≥1.3.0 | — |
-| TUI 鼠标交互、指标面板 | v0.23.0 | ≥1.3.0 | Solid.js + OpenTU |
+**能力开关目前是「声明」而非「门禁」**：工具装配阶段并不读取这组值，因此能力矩阵用于解释行为差异，不能替代逐工具的可用性核对。
 
-> 来源：`../rolebox/CHANGELOG.md` — 每项功能的引入版本；`../rolebox/package.json:5-7` — `engines.opencode` 声明为 `^1.0.0`；`../rolebox/package.json:77` — `peerDependencies['@opencode-ai/plugin']` 声明为 `^1.3.0`。
+## 工具面（Tool Surface）
 
-## 破坏性变更摘要
+三个 harness 都消费同一套**规范工具集（canonical tools，跨 harness 共享的公共工具面）**，平台差异通过额外的工具注入实现。
 
-以下表格汇总了 rolebox 各版本引入的破坏性变更，帮助用户在升级前评估影响范围。版本信息来源于 [CHANGELOG](https://github.com/EricMoin/rolebox/blob/main/CHANGELOG.md)。
+### 共享工具面
 
-| 版本 | 变更类型 | 所需操作 |
-|------|---------|---------|
-| v0.23.0 | TUI 键盘交互移除 | 改用鼠标点击操作；原有键盘快捷键更新为 `Ctrl+` 前缀以避免冲突 |
-| v0.20.0 | 运行时依赖变更 | 安装 **Bun ≥1.1.0**——持久记忆系统依赖于 `bun:sqlite`，无法在纯 Node.js 环境下运行 |
-| v0.17.0 | 核心依赖升级 | 更新 `peerDependencies`：opencode ≥1.3.0，`@opencode-ai/plugin` 升级至 `^1.3.0` |
-| v0.15.0 | Loop 语义重写 | `|loop|` 每轮循环（包括第一轮）在子工作线程中运行，主线程变为纯编排角色，不再直接执行循环任务 |
-| v0.12.0 | 状态存储迁移 | 状态存储路径从 `XDG_DATA_HOME` 变更为项目本地 `.rolebox/` 目录；旧数据需手动迁移 |
-| v0.10.0 | Dispatch 调度系统重写 | 旧的全局轮询模式被 `TaskWatchdogManager` 取代；建议清空旧的 `.rolebox/state/` 状态文件 |
+| 工具组 | 工具 |
+|---|---|
+| Hashline 编辑 | `hashline_read` / `hashline_edit` |
+| 记忆 | `memory_write` / `memory_recall` / `memory_list` |
+| Web | `web_search` / `web_read` / `web_fetch` |
+| 控制与终端 | `signal` / `interactive_terminal` |
+| Asset 与引用 | `asset_search` / `asset_inspect` / `asset_validate` / `reference_search` |
+| 会话（需要会话客户端） | `session_list` / `session_read` / `session_search` / `session_info` / `session_diff` / `session_fork` |
+| 图编排（需要调度管理器或平台图工具集） | `graph_create` / `graph_add_node` / `graph_add_edge` / `graph_add_loop` / `graph_run` / `graph_status` / `graph_cancel` / `graph_approve` |
 
-> 来源：`../rolebox/CHANGELOG.md` — 各版本的破坏性变更记录。非破坏性版本（v0.16.x、v0.18.x、v0.19.x、v0.21.x、v0.22.x）不在此表列出。
+### harness 专属与编排工具
 
-### 兼容性变更与功能限制关联
+| 工具组 | opencode | pi | dsh |
+|---|---|---|---|
+| `memory_update` | ✅ | ✅ | ❌ 未装配 |
+| `function_graph` / `skill_compose` / `context_assemble` | ✅ | ✅ | ❌ 未装配 |
+| `lsp_*`（32 个语言服务器工具） | ✅ | ✅ | ❌ 未装配 |
+| `asset_hot_reload` | ✅ | ❌ opencode 专属 | ❌ |
+| `load_role_skill` | ❌ opencode 有原生 skill 工具 | ✅ pi 专属 | ❌ |
+| `task_*` 兼容层 | ✅ | ✅ | ❌ 未装配 |
+| `dispatch_*` | ❌ 禁用，编排图化 | ❌ 不注册 | ❌ 未装配 |
+| `loop_*` | ❌ 禁用，由 `graph_add_loop` 取代 | ❌ 禁用 | ✅ 仍注册 |
 
-| 破坏性变更 | 关联限制 | 说明 |
-|-----------|---------|------|
-| v0.23.0 TUI 键盘→鼠标 | — | 交互变更，不涉及底层功能限制 |
-| v0.20.0 Bun 运行时依赖 | [持久记忆系统](/04-Advanced/memory-system) 依赖 `bun:sqlite` | 详见[兼容性 → Bun vs Node.js](/04-Advanced/compatibility#bun-vs-node-js) |
-| v0.17.0 opencode ≥1.3.0 | [子代理嵌套深度上限](/03-Reference/limitations#子代理嵌套深度上限) 3 层 | SDK 升级，子代理模型不受影响 |
-| v0.15.0 Loop 语义重写 | [循环系统](/04-Advanced/loop-system) 9 阶段状态机 | Loop 重启后自动恢复 |
-| v0.12.0 状态迁移 `.rolebox/` | [无运行时角色切换](/03-Reference/limitations#无运行时角色切换) | 状态文件路径变更，角色模型不变 |
-| v0.10.0 Dispatch 重写 | [调度并发限制](/03-Reference/limitations#调度系统dispatch) | 事件驱动架构，新增模型并发槽位
+`task_retry` 在装配 `task_*` 的两个平台上都被刻意扣留：它会绕过图引擎的预算与审批门。
 
-## 平台支持
+### 引擎状态持久化差异
 
-| 平台 | 状态 | 说明 |
-|------|------|------|
-| macOS | 完整支持 | 主开发平台 |
-| Linux | 完整支持 | CI 验证 |
-| Windows | 基本支持 | 部分路径处理可能有差异；欢迎报告问题 |
+`graph_*` 引擎的持久化范围随 harness 而异：
+
+| harness | 引擎状态 |
+|---|---|
+| opencode | **完全内存运行**：状态不写入 `.rolebox/state/engine-*.json`，没有跨会话恢复扫描，也不写 graph 事件日志；图的生命周期限定在创建它的进程内 |
+| pi | 传入状态目录并接上启动恢复扫描与事件记录器，状态落在 `.rolebox/state` |
+| dsh | 传入状态目录，状态落在 `.rolebox/state`；插件启动时另外执行 loop 状态恢复 |
+
+## harness 版本约束
+
+| harness | 声明位置 | 约束 |
+|---|---|---|
+| opencode | `package.json` 的 `engines.opencode` | `^1.0.0` |
+| opencode | `package.json` 的 `peerDependencies["@opencode-ai/plugin"]` | `^1.3.0` |
+| pi | `peerDependencies["@earendil-works/pi-coding-agent"]` | `>=0.70.0`（可选 peer） |
+| dsh | `peerDependencies["@deepseek-ai/cordis"]` | `4.0.2`（可选 peer） |
+
+早于 v1.0.0 的文档给出过按 rolebox 版本递增的 opencode 最低版本表（如 v0.17.x → opencode ≥1.3.0）。当前仓库只声明上表约束，旧阈值不再作为安装前置条件。
+
+## 功能兼容矩阵（Feature Matrix）
+
+下表列出各功能领域的引入版本与适用 harness。**适用 harness** 一列是重点：不默认「全部功能都属于 opencode」。
+
+| 功能领域 | 引入版本 | 适用 harness | 说明 |
+|---|---|---|---|
+| 角色 YAML 系统 | v0.1.x（早于 CHANGELOG 记录） | 三种 | `role.yaml` 加载与解析 |
+| Functions 函数系统 | v0.2.0 | 三种 | 用竖线包裹函数名激活（如 plan、execute） |
+| CLI 工具链（init / list / search / update / registry / sync） | v0.4.0 | 三种（CLI 层，与 harness 无关） | citty |
+| 子代理系统 | v0.5.1 | 三种 | 命名 `{parent}--{child}` |
+| References 引用文档系统 | v0.6.0 | 三种 | 递归发现 `references/` |
+| Dispatch 调度引擎（事件驱动） | v0.10.0 | 三种 | `TaskWatchdogManager`；dsh 声明 `hasBackgroundTasks: false` |
+| Monitor 监控面板 | v0.11.0 | 三种（交互 TUI 为 opencode 专属） | — |
+| Loop 循环系统 | v0.14.0 | 三种 | 有界循环组；硬上限参数为 `max_traversals` |
+| LSP 集成（32 个工具） | v0.17.0 | opencode、pi | dsh 未装配 |
+| 会话管理工具（6 个） | v0.17.0 | 三种 | 分叉能力：opencode ✅ / pi ❌ / dsh ✅ |
+| Hashline 内容哈希编辑 | v0.17.0 | 三种 | 内容哈希锚点 + 文件版本守卫 |
+| 模型重复预防 | v0.18.0 | 三种 | — |
+| 扩展系统与自定义 Hook | v0.19.0 | opencode 完整、pi 非目标 | pi 运行轻量服务栈 |
+| 错误恢复框架 | v0.19.0 | opencode 完整、pi 非目标 | pi 仅保留图引擎启动恢复 |
+| 通知管理器 | v0.19.0 | 三种 | 多通道、静默时段 |
+| 持久记忆系统（SQLite + FTS5） | v0.20.0 | 三种 | 双运行时驱动（Bun / Node） |
+| 微内核架构与角色热重载 | v0.20.0 | opencode 完整、pi 非目标 | pi 运行轻量服务栈 |
+| Token/成本预算管理 | v0.20.0 | 三种 | 图级与节点级预算 |
+| TUI 仪表板（`rolebox monitor`） | v0.20.0 | opencode（交互 TUI） | 文本输出为 CLI 层 |
+| 崩溃恢复 | v0.21.0 | 三种 | 引擎状态持久化范围随 harness 而异 |
+| Asset 工具套件（search / inspect / validate） | v0.21.0 | 三种 | — |
+| web_fetch / web_read（多后端渲染） | v0.22.0 | 三种 | Playwright / Crawlee 可选 |
+| Signal 带外控制信号 | v0.22.0 | 三种 | 不嵌入文本内容 |
+| 平台抽象层（`ISessionClient`） | v0.22.0 | 三种 | ports-and-adapters |
+| 交互式终端工具 | v1.4.0 | 三种 | node-pty 可选，缺失时回退管道 |
+| pi 扩展与 dsh 插件 | v1.2.0 | pi、dsh | 各自的宿主入口模块 |
+| pi / dsh 作为 CLI 同步目标 | v1.3.0 | 三种 | `rolebox sync <target>` |
+| 引擎 `<graph_state>` 提示块与 `graph:` 角色配置键 | v1.8.0 | 三种 | v2 引擎系统提示块 |
+| dsh web 角色坞与监控面板 | v1.5.0 / v1.9.0 | dsh | cordis 插件 + 浏览器侧 bundle |
+
+「pi 非目标」指热重载、扩展、恢复引擎与 TUI 是 pi 相对于 opencode 的显式缺口；完整清单见[已知限制](/03-Reference/limitations)。
 
 ## 运行时依赖
 
-rolebox 对运行时环境的最低要求：
+| 依赖 | 要求 | 说明 |
+|---|---|---|
+| 持久记忆（Bun 运行时） | `bun:sqlite` | 动态导入 |
+| 持久记忆（Node 运行时） | `node:sqlite`，自 Node 22.5 起可用 | 动态导入；两条路径都不会在另一种运行时下于模块求值阶段崩溃 |
+| 可选渲染后端 | `playwright` ≥1.40.0 或 `crawlee` ≥3.0.0 | web 工具的页面渲染 |
+| 可选终端后端 | `node-pty` ≥1.0.0 | `interactive_terminal`；缺失时回退管道 |
+| 构建与测试 | `bun run build`、`bun test` | 仓库开发用，与运行时部署无关 |
 
-- **Bun** ≥1.1.0（用于 `bun:sqlite` 和运行时）
-- **Node.js** ≥20.0.0（opencode 运行时要求）
-- **npm** ≥9.0.0（包安装）
+## 操作系统支持
 
-## Bun vs Node.js
+| 平台 | 状态 | 说明 |
+|---|---|---|
+| macOS | 完整支持 | CI 矩阵覆盖 |
+| Linux | 完整支持 | CI 矩阵覆盖 |
+| Windows | 基本支持 | CI 矩阵覆盖；历史上有多轮 Windows 可移植性修复 |
 
-rolebox 核心运行时依赖 **Bun**，但部分子系统和可选功能可兼容 Node.js。
+CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个 runner 上运行类型检查、构建与测试。少数依赖真实 `tar` 的安装测试在没有可用 `tar` 的宿主上会优雅跳过而不是让构建失败。Windows 的路径分隔符与符号链接行为仍可能与类 Unix 系统不同。
 
-### 必须使用 Bun 的功能
+## 已知兼容边界
 
-| 功能 | 依赖 | 来源 |
-|------|------|------|
-| 持久记忆系统 | `bun:sqlite` (内置 SQLite 引擎) | `src/memory/store.ts:3`, `src/memory/search.ts:1`, `src/memory/schema.ts:1` |
-| 构建流程 | `bun run build` (TypeScript 编译 + TUI 构建) | `package.json:36` |
-| 测试运行 | `bun test` | `package.json:40-41` |
-| CLI 开发脚本 | `bun run scripts/*` | `package.json` |
+- **会话内角色切换**：opencode 不支持（`hasRoleSwitch: false`）；pi 与 dsh 支持（角色选择器与宿主路由）。
+- **子代理嵌套**：基于文件系统的子代理支持递归嵌套，最大深度 3；子代理之间不能直接通信，所有协调经父角色进行。
+- **无角色继承**：角色之间不支持继承关系，每个角色完全独立。
+- **pi 的平台固有缺口**：热重载、扩展、恢复引擎与 TUI 在 pi 上为显式非目标——pi 运行轻量服务栈，而不是完整的微内核服务栈。
 
-### 可用 Node.js 运行的功能
+## 与 opencode 生态共存
 
-以下功能在 Bun 环境下开发验证，但底层依赖均为纯 JavaScript/TypeScript 包，理论上可在 Node.js ≥20.0.0 下运行：
+rolebox 与 [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) 可以同时运行：角色出现在 agent 列表中，技能可由原生 skill 工具发现，两者无冲突。这条共存说明只适用于 opencode——pi 与 dsh 不使用 opencode 的 agent/skill 发现机制，而是各自走扩展与 cordis 插件注册。
 
-| 功能 | 说明 |
-|------|------|
-| 角色 YAML 加载与解析 | 依赖 `js-yaml` （纯 JS） |
-| CLI 命令 (init/list/search/update/sync) | 依赖 `citty` (纯 JS) |
-| Dispatch 调度系统 | 全部为纯 TS 实现 |
-| LSP 集成 | 通过 child_process 调用语言服务器 |
-| Hashline 编辑系统 | 纯文件 I/O |
-| web_fetch / web_read | 依赖可选包 (Playwright 在 Node.js 下可用) |
-| TUI 仪表板 | 依赖 Solid.js + OpenTU (跨运行时) |
+## 破坏性变更与升级
 
-> 注意：虽然上述功能在 Node.js 下可运行，但 rolebox 官方仅验证 Bun 运行时。在 Node.js 下运行未经完整测试，可能存在未预期的行为差异。建议始终使用 Bun 运行 rolebox。
-
-### 运行时对比
-
-| 维度 | Bun | Node.js |
-|------|-----|---------|
-| SQLite 支持 | ✅ 内置 `bun:sqlite` | ❌ 需额外安装 `better-sqlite3` 等包 |
-| 启动速度 | ✅ 快速 (编译缓存) | ⚠️ 较慢 |
-| 包管理 | ✅ 内置 (bun install) | ✅ npm/pnpm/yarn |
-| rolebox 官方支持 | ✅ 完整支持 | ⚠️ 部分支持（未完整验证） |
-
-> 来源：`../rolebox/src/memory/store.ts:3`, `../rolebox/src/memory/search.ts:1`, `../rolebox/src/memory/schema.ts:1` — 确认 `bun:sqlite` 为内存系统的硬依赖。
-
-## 已知兼容性边界
-
-- **无角色继承**：角色之间不支持继承关系，每个角色完全独立
-- **无运行时角色切换**：会话中途不能更换代理角色
-- **无跨子代理直接通信**：子代理之间不能直接通信，结果通过父角色传递
-- **最多 3 级嵌套**：dispatch 支持的嵌套深度上限为 3 级（父 → 子 → 孙）
-
-## 从 v0.x 升级指南
-
-rolebox 经历了从 v0.1 到 v0.23 的快速迭代，其中部分版本引入了需要关注的变化。
-
-### v0.15.x → v0.17.x：核心功能升级
-
-这是功能最密集的升级窗口，新增了 LSP 集成（30+ 工具）、会话管理工具套件和 Hashline 编辑系统。升级后需注意：
-
-- **opencode 版本要求提升至 ≥1.3.0**（原先 ≥1.0.0）
-- **`@opencode-ai/plugin` 依赖更新至 `^1.3.0`**（新增 SDK 接口）
-- 需确保 `package.json` 中的 `peerDependencies` 已更新
-
-```bash
-# 升级命令
-npm install rolebox@latest
-# 确认 opencode 版本
-npx opencode --version  # 应 ≥1.3.0
-```
-
-### v0.12.0：状态存储迁移
-
-v0.12.0 将状态存储从 `XDG_DATA_HOME` **迁移到项目本地 `.rolebox/` 目录**。如果你从 v0.11.x 或更早版本升级：
-
-- 历史会话和调度状态**不会自动迁移**——旧数据保留在原位置
-- 新会话和调度任务将写入 `.rolebox/` 目录
-- 如需保留旧状态数据，手动复制 `~/.local/share/rolebox/` 的内容到项目 `.rolebox/state/` 目录
-
-### v0.10.0：Dispatch 调度系统重写
-
-v0.10.0 对 dispatch 子系统进行了全面重写（事件驱动、并发隔离、状态持久化 v2）：
-
-- 旧的全局轮询模式被 `TaskWatchdogManager` 取代
-- 引入了 per-model 并发隔离和背压队列
-- 状态持久化使用新的 schema v3/v4——如果从更早版本升级，旧的 dispatch 状态文件不会被读取
-- 建议升级后清空旧的状态目录：`rm -rf .rolebox/state/`（如果存在旧文件）
-
-### v0.5.x 及更早版本：重大架构变更
-
-- **v0.6.0**：引入 References 和 Collaboration Graph 系统
-- **v0.10.0**：从简单 dispatch 到事件驱动架构
-- **v0.15.0**：`|loop|` 语义重写——每轮循环（包括第一轮）在子工作线程中运行
-- **v0.17.0**：LSP、会话工具、Hashline 编辑——需要更新 `peerDependencies`
-- **v0.20.0**：微内核架构、记忆系统、TUI 仪表板——需要 Bun ≥1.1.0
-
-> 来源：[CHANGELOG](https://github.com/EricMoin/rolebox/blob/main/CHANGELOG.md) — 完整的版本历史及各版本的破坏性变更说明。
-
-::: tip 升级路径决策树
-
-根据您当前使用的 rolebox 版本，参考以下升级路径：
-
-- 从 **v0.5.x** 升级：需依次关注 v0.6.0（References 系统）→ v0.10.0（Dispatch 重写）→ v0.12.0（状态迁移）→ v0.15.0（Loop 重写）→ v0.17.0（依赖升级）→ v0.20.0（Bun 运行时）
-- 从 **v0.10.x** 升级：需依次关注 v0.12.0（状态迁移）→ v0.15.0（Loop 重写）→ v0.17.0（依赖升级）→ v0.20.0（Bun 运行时）
-- 从 **v0.17.x** 升级：需依次关注 v0.20.0（安装 Bun 运行时）→ v0.23.0（TUI 键盘交互变更为鼠标）
-- 从 **v0.20.x** 升级：直接升级至最新版，注意 v0.23.0 中 TUI 键盘快捷键已变更为 `Ctrl+` 前缀
-
----
-
-## 弃用时间线
-
-以下功能已进入弃用路径或已被替代，在版本升级时需关注兼容性变更。
-
-| 版本 | 弃用项 | 替代方案 | 状态 |
-|------|--------|---------|------|
-| v0.23.0 | TUI 键盘交互模式 | 鼠标交互（Ctrl+ 前缀快捷键） | 已移除（CHANGELOG.md:28） |
-| v0.22.0 | OpencodeClient 会话接口 | ISessionClient 平台抽象层 | 已替换（CHANGELOG.md:62） |
-| v0.15.0 | LoopManager 顺序状态机 | LoopCoordinator 推链调度 | 已替换（CHANGELOG.md:215） |
-| v0.12.0 | XDG_DATA_HOME 状态存储 | 项目本地 .rolebox/ 目录 | 已迁移（CHANGELOG.md:302） |
-| v0.10.0 | 全局轮询 Dispatch 模式 | TaskWatchdogManager 事件驱动 | 已替换（CHANGELOG.md:316） |
-
-> 以上信息来源于 CHANGELOG.md。处于已替换或已迁移状态的功能在旧版本中仍保留，但后续版本不再维护。建议在升级时参考[破坏性变更摘要](#破坏性变更摘要)中的操作指引。
-
-:::
-
-## 下一步
-
-- [已知限制](/03-Reference/limitations) — 完整的功能限制列表
-- [子代理](/02-Guide/subagents) — 子代理层级与调度机制
-- [调度配置](/03-Reference/dispatch-config) — 并发与预算控制
+本页不再重复破坏性变更清单与升级步骤：各版本的移除项、旧写法到新写法的对照，以及 v0.x 到 v1.9.0 的升级路径，统一见[迁移对照](/06-Appendix/migration)。

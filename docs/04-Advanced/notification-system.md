@@ -1,681 +1,336 @@
 ---
-title: 通知系统
-description: NotificationManager 架构、9 种事件类型、6 种通道、安静时段、节流控制——桌面通知的完整配置参考
+title: 通知系统（Notification System）
+description: NotificationManager 的内部实现 — 配置解析与合并、10 种事件、6 种通道、安静时段、节流、空闲检测与通道路由
 ---
 
-# 通知系统
+# 通知系统（Notification System）
 
-> **v0.19.0 引入** — 通知管理子系统，支持 9 种事件类型、6 种通道分发、安静时段与节流控制（CHANGELOG.md:177）
+通知子系统在后台任务完成、需要人工介入或发生错误时提醒用户：`NotificationManager` 统一接收事件、执行守卫检查、构建通知内容，再把消息分发到一个或多个通道。实现位于 `src/notifications/`，装配与事件总线订阅位于 `src/core/services/notification-service.ts`。
 
-> **相关文档：** [运行时行为](/04-Advanced/runtime-behavior) — 协作图状态机与 dispatch 驱动 | [会话工具](/04-Advanced/session-tools) — 10 工具会话管理套件 | [兼容性](/04-Advanced/compatibility) — 跨平台兼容性
+> **本页的边界**：本页只讲引擎内部实现；配置文件字段表保留在此，因为解析本身就是实现的一部分。使用者视角的内容在别处：角色级 `notifications:` 键见 [role.yaml 参考](/03-Reference/role-yaml)，触发通知的工具（`graph_*`、`signal` 等）的参数见[工具目录 · 编排分册](/03-Reference/tools/orchestration-tools)，`rolebox monitor` 的状态面板开关见 [CLI 参考](/03-Reference/cli)，自定义通道与事件的注册协议见[扩展机制](/03-Reference/extensions)。
 
+> 自 v0.19.0 起，通知由 NotificationManager 统一管理；`approval_pending` 事件自 v1.7.0 起加入。
 
-通知系统让 rolebox 在后台任务完成、需要用户介入、或发生错误时主动提醒你。它通过 **NotificationManager** 统一管理事件接收、配置解析、静音检测、节流控制、多通道分发和空闲检测。
+## 1. 组件构成
+
+| 组件 | 模块 | 职责 |
+|---|---|---|
+| `NotificationManager` | `src/notifications/manager.ts` | 门面：配置解析、守卫检查、内容构建、通道分发、热加载 |
+| `NotificationScheduler` | `src/notifications/scheduler.ts` | 每会话空闲定时器、活动标记、防重复守卫、LRU 会话清理 |
+| `NotificationThrottle` | `src/notifications/throttle.ts` | 滚动窗口速率限制、硬最小间隔、定期清理 |
+| `QuietHours` | `src/notifications/quiet-hours.ts` | 时区感知的静音判定与恢复时间计算 |
+| 通道实现 | `src/notifications/channels/` | 6 种内置通道，各自实现 `send()` 与 `dispose()` |
+| 通道路由 | `src/notifications/channels.ts`、`src/notifications/channel-resolver.ts` | 按配置创建通道实例、按 agent 缓存、自定义通道工厂注册 |
+| 内容与格式化 | `src/notifications/content.ts`、`src/notifications/formatting.ts` | 模板变量渲染、会话信息读取、按平台转义与截断 |
+| 平台探测 | `src/notifications/platform.ts` | 探测操作系统、在 PATH 中解析通知与播放命令 |
+| 配置解析 | `src/notifications/config.ts`、`src/notifications/config-parsers.ts` | 默认值、字段校验、事件级合并、`{env:VAR}` 插值 |
+
+构造 `NotificationManager` 时创建 scheduler / throttle / quietHours 三个子系统，调用 `detectPlatform()` 取得平台信息，并用 `preWarmCommandCache()` 预热 `terminal-notifier`、`osascript`、`notify-send`、`afplay`、`paplay`、`aplay`、`powershell` 的命令查找缓存（`findCommand()` 命中缓存后不再访问 PATH）。
 
 ```mermaid
-graph TB
-    subgraph Sources[事件源]
-        U[用户操作<br/>提问/回复]
-        S[系统事件<br/>完成/错误/超时]
-    end
-
-    subgraph Manager[NotificationManager]
-        T[Throttle<br/>节流控制]
-        Q[QuietHours<br/>安静时段]
-        SC[Scheduler<br/>空闲调度]
-    end
-
-    subgraph Channels[通道分发]
-        CD[Channel Dispatcher]
-        ST[system_toast]
-        SD[sound]
-        WH[webhook]
-        FL[file]
-        LG[log]
-        CM[command]
-    end
-
-    U --> T
-    S --> T
-    T --> Q
-    Q --> SC
-    SC --> CD
-    CD --> ST
-    CD --> SD
-    CD --> WH
-    CD --> FL
-    CD --> LG
-    CD --> CM
+graph LR
+    S[事件源] --> M[NotificationManager.notify]
+    M --> G[守卫检查<br/>enabled / 事件开关 / 安静时段 / 节流]
+    G --> C[buildNotificationContent]
+    C --> R[resolveChannels<br/>按 agent 缓存]
+    R --> D[Promise.allSettled<br/>并行分发到各通道]
 ```
 
----
+## 2. 配置加载与解析
 
-## 1. NotificationManager 架构
+通知配置分两层：全局配置来自环境变量 `ROLEBOX_NOTIFICATIONS_CONFIG` 指向的 YAML 文件，角色级配置来自 `role.yaml` 的 `notifications:` 块。`NotificationService.init()` 读取全局文件并解析每个已解析角色的 `notifications` 字段，再把两份配置交给 `NotificationManager`。
 
-`NotificationManager`（`src/notifications/manager.ts:38-49`）是通知子系统的核心类。它持有以下子系统实例：
-
-| 子系统 | 类型 | 职责 |
-|--------|------|------|
-| `scheduler` | `NotificationScheduler` | 空闲检测定时器管理（`scheduler.ts:44-79`） |
-| `throttle` | `NotificationThrottle` | 速率限制和去重（`throttle.ts:38-64`） |
-| `quietHours` | `QuietHours` | 静音时段判定（`quiet-hours.ts:86-91`） |
-| `channelCache` | `Map<string, NotificationChannel[]>` | 通道实例缓存（`manager.ts:48`） |
-| `platform` | `PlatformInfo` | 操作系统检测结果（`manager.ts:49`） |
-
-### 构造函数
-
-```typescript
-// src/notifications/manager.ts:51-81
-constructor(opts: {
-  globalConfig: NotificationConfig;           // 全局通知配置
-  roleConfigs: Map<string, NotificationConfig>; // 按角色覆盖的配置
-  client: ISessionClient;                       // 会话客户端
-  dir: string;                                  // 工作目录
-})
+```yaml
+# 全局配置文件，路径由 ROLEBOX_NOTIFICATIONS_CONFIG 指定
+enabled: true
+idleDelayMs: 1500
+channels:
+  - kind: system_toast
+    enabled: true
+  - kind: sound
+    enabled: true
+    soundPath: /path/to/notification.wav
+  - kind: log
+    enabled: true
+    level: info
+quietHours:
+  enabled: true
+  timezone: Asia/Shanghai
+  ranges:
+    - start: "22:00"
+      end: "08:00"
+throttle:
+  windowMs: 3000
+  maxPerWindow: 3
+events:
+  error:
+    enabled: true
+    channels:
+      - kind: system_toast
+        enabled: true
+      - kind: webhook
+        enabled: true
+        url: https://hooks.example.com/alerts
+  loop_complete:
+    enabled: false
 ```
 
-构造时初始化所有子系统，并调用 `preWarmCommandCache` 预检查各平台可用的通知命令（`terminal-notifier`、`osascript`、`notify-send`、`afplay`、`paplay`、`aplay`、`powershell`）。
+单独设置 `ROLEBOX_NOTIFICATIONS_ENABLED=false`（或 `0`）会在解析后把全局配置的 `enabled` 强制改为 `false`。
 
-### 配置解析
-
-`getConfigForSession`（`manager.ts:92-100`）按以下规则合并配置：
-
-1. 若无 `agent` 参数，直接返回全局配置
-2. 若 `agent` 在 `roleConfigs` 中存在，将角色配置 `merge` 到全局配置之上
-
-合并策略（`config.ts:212-285`）：
-- **标量字段**（`enabled`、`mainSessionOnly`、`idleDelayMs`、`throttle`、`quietHours`）：角色配置完全覆盖全局
-- **`channels`**：角色配置的通道数组**替换**全局的
-- **`events`**：按事件类型合并，角色的事件配置替换同类型全局配置，仅全局有的保留
-
-### 核心通知流程 `notify()`
+### 2.1 顶层字段
 
 ```typescript
-// src/notifications/manager.ts:111-184
-async notify(opts: {
-  sessionID: string;
-  eventType: string;
-  agent?: string;
-  roleName?: string;
-  questionText?: string;
-}): Promise<void>
-```
-
-执行以下顺序检查：
-
-1. **校验事件类型**：不在 `VALID_NOTIFICATION_EVENT_TYPES` 中的静默忽略
-2. **全局启用检查**：`config.enabled === false` 时跳过
-3. **事件级别启用**：`events[eventType].enabled === false` 时跳过
-4. **安静时段检查**：优先使用事件级别的 `quietHoursOverride`，否则使用全局安静时段
-5. **节流检查**：调用 `throttle.allow()` 判断是否超过速率限制
-6. **内容构建**：`buildNotificationContent()` 从会话数据组装消息
-7. **通道分发**：对所有激活通道并行调用 `ch.send(message)`，失败仅日志警告
-
-所有异常在顶层被 `try/catch` 捕获，`NotificationManager` **永不向外抛出异常**（`manager.ts:181-183`）。
-
----
-
-## 2. 配置文件
-
-通知系统通过 `notifications.jsonc` 文件配置，位于 `~/.config/opencode/rolebox/` 目录下。
-
-### 配置结构
-
-```typescript
-// src/notifications/types.ts:181-198
 interface NotificationConfig {
-  enabled: boolean;                    // 总开关
-  mainSessionOnly: boolean;            // 仅主会话触发通知
-  idleDelayMs: number;                 // 空闲检测延迟（毫秒）
-  questionToolNames: string[];         // 触发提问事件的目标工具名
-  channels: NotificationChannelConfig[]; // 全局通道列表
-  events?: Record<string, NotificationEventConfig>; // 按事件类型覆盖
-  quietHours: QuietHoursConfig;        // 全局安静时段
-  throttle: ThrottleConfig;            // 全局节流配置
+  enabled: boolean;                                       // 总开关
+  mainSessionOnly: boolean;                               // 仅主会话触发（见 §9 实现边界）
+  idleDelayMs: number;                                    // 空闲判定延迟（毫秒）
+  questionToolNames: string[];                            // 触发 question 事件的工具名
+  channels: NotificationChannelConfig[];                  // 全局通道列表
+  events?: Partial<Record<string, NotificationEventConfig>>; // 按事件类型覆盖
+  quietHours: QuietHoursConfig;                           // 全局安静时段
+  throttle: ThrottleConfig;                               // 全局节流
 }
 ```
 
-### 默认值
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 总开关，关闭后 `notify()` 直接返回 |
+| `mainSessionOnly` | `true` | 仅参与解析与合并，当前版本没有消费点（§9） |
+| `idleDelayMs` | `1500` | 空闲多久后触发 `idle` 事件 |
+| `questionToolNames` | `["question", "ask_user_question", "askuserquestion"]` | 命中的工具调用触发 `question` 事件 |
+| `channels` | `[]` | 默认无通道，因此默认不发通知 |
+| `events` | 仅 `approval_pending` 预置 `enabled: true` | 事件级覆盖的种子 |
+| `quietHours` | `{ enabled: false, ranges: [] }` | 未启用即不静音 |
+| `throttle` | `{ windowMs: 3000, maxPerWindow: 3 }` | 全局节流 |
+
+### 2.2 事件级字段
+
+每个事件类型可以覆盖通道、模板、节流与安静时段：
 
 ```typescript
-// src/notifications/config.ts:43-58
-// src/constants.ts:134-139
-```
-
-| 字段 | 默认值 | 来源 |
-|------|--------|------|
-| `enabled` | `true` | `config.ts:44` |
-| `mainSessionOnly` | `true` | `config.ts:45` |
-| `idleDelayMs` | `1500` | `constants.ts:134` |
-| `throttle.windowMs` | `3000` | `constants.ts:135` |
-| `throttle.maxPerWindow` | `3` | `constants.ts:136` |
-| `questionToolNames` | `["question", "ask_user_question", "askuserquestion"]` | `constants.ts:139` |
-| `quietHours.enabled` | `false` | `config.ts:51` |
-
-### JSONC 示例
-
-```jsonc
-// ~/.config/opencode/rolebox/notifications.jsonc
-{
-  // 总开关
-  "enabled": true,
-
-  // 空闲检测延迟（毫秒）
-  "idleDelayMs": 1500,
-
-  // 全局通道配置
-  "channels": [
-    { "kind": "system_toast", "enabled": true },
-    { "kind": "sound", "enabled": true, "soundPath": "/path/to/notification.wav" },
-    { "kind": "log", "enabled": true, "level": "info" }
-  ],
-
-  // 安静时段：22:00–08:00 不打扰
-  "quietHours": {
-    "enabled": true,
-    "timezone": "Asia/Shanghai",
-    "ranges": [
-      { "start": "22:00", "end": "08:00" }
-    ]
-  },
-
-  // 全局节流：3 秒窗口内最多 3 条
-  "throttle": {
-    "windowMs": 3000,
-    "maxPerWindow": 3
-  },
-
-  // 按事件类型覆盖
-  "events": {
-    "error": {
-      "enabled": true,
-      "channels": [
-        { "kind": "system_toast", "enabled": true },
-        { "kind": "webhook", "enabled": true, "url": "https://hooks.example.com/alerts" }
-      ]
-    },
-    "loop_complete": {
-      "enabled": false  // 关闭循环完成的通知
-    }
-  }
+interface NotificationEventConfig {
+  enabled: boolean;
+  channels?: NotificationChannelConfig[];   // 覆盖全局通道
+  titleTemplate?: string;                    // 支持 {var_name} 占位符
+  messageTemplate?: string;
+  throttle?: Partial<ThrottleConfig>;
+  quietHoursOverride?: QuietHoursConfig;
 }
 ```
 
-### 环境变量插值
+`approval_pending` 在默认配置中预置了 `enabled: true` 与标题模板 `Approval gate waiting: {graph_id}/{node_id}`，因此图审批门无需任何配置即可发通知。模板由 `renderTemplate()` 渲染，占位符语法是单个花括号的 `{var_name}`（源码注释里写的 `{{var}}` 是过时注释）；可用变量由 `buildTemplateVars()` 生成：`session_id`、`session_title`、`event_type`、`agent`、`role_name`、`last_user_message`、`last_assistant_message`、`timestamp`，图事件另外注入 `graph_id` 与 `node_id`。
 
-配置中的字符串值支持 `{env:VAR_NAME}` 语法，在运行时由 `resolveEnvVarsInConfig`（`config.ts:294-296`）解析为实际环境变量值。
+未命中占位符时标题默认渲染为 `Rolebox · {event_type}`，正文默认渲染为 `{session_title}`；标题截断到 256 字符，正文截断到 4000 字符。
 
-```jsonc
-{
-  "channels": [
-    {
-      "kind": "webhook",
-      "enabled": true,
-      "url": "{env:SLACK_WEBHOOK_URL}"
-    }
-  ]
-}
+### 2.3 全局与角色的合并
+
+`getConfigForSession()` 只在传入 `agent` 且该角色存在配置时做合并，否则直接返回全局配置。`mergeNotificationConfigs()` 的合并规则是「角色优先」：
+
+| 字段类别 | 合并规则 |
+|---|---|
+| 标量字段（`enabled`、`mainSessionOnly`、`idleDelayMs`、`quietHours`、`throttle`） | 角色配置整体替换全局值 |
+| `questionToolNames`、`channels` | 角色数组替换全局数组（不追加） |
+| `events` | 按事件键合并：角色显式声明的键覆盖同名全局键；只出现在全局的键保留 |
+
+### 2.4 环境变量插值
+
+所有字符串值支持 `{env:VAR_NAME}` 语法，`resolveEnvVarsInConfig()` 递归解析；变量未设置时保留原占位符并记一条 info 日志（解析器位于 `src/resolver/env-resolver.ts`）。
+
+```yaml
+channels:
+  - kind: webhook
+    enabled: true
+    url: "{env:SLACK_WEBHOOK_URL}"
 ```
 
----
+注意：插值发生在 `parseNotificationConfig()` 之后、`NotificationManager` 构造之前，因此 `{env:...}` 不能用来提供非字符串字段。
 
 ## 3. 事件类型
 
-系统内置 9 种通知事件类型（`src/notifications/types.ts:3-13`），可通过 `events` 配置按类型覆盖通道、模板或节流。
+`NotificationEventType` 是开放字符串类型（`export type NotificationEventType = string`），内置的 10 个常量只是 `VALID_NOTIFICATION_EVENT_TYPES` 的来源，用于 `notify()` 的运行时校验；任何自定义字符串都可以通过 `events` 配置注册与覆盖。
 
-| 类型常量 | 值 | 触发时机 | 源码位置 |
-|----------|-----|----------|----------|
-| `Idle` | `"idle"` | 会话在 `idleDelayMs` 内无活动 | `manager.ts:213-223` |
-| `Question` | `"question"` | 代理调用匹配 `questionToolNames` 的工具 | `manager.ts:261-303` |
-| `Permission` | `"permission"` | 代理请求用户权限（预留） | `types.ts:6` |
-| `Error` | `"error"` | 会话发生错误 | `manager.ts:234-242` |
-| `DispatchComplete` | `"dispatch_complete"` | 子任务完成派发 | `manager.ts:308-316` |
-| `DispatchProgress` | `"dispatch_progress"` | 子任务进度更新（预留） | `types.ts:9` |
-| `LoopComplete` | `"loop_complete"` | 循环迭代完成 | `manager.ts:319-327` |
-| `SessionDeleted` | `"session_deleted"` | 会话被删除 | `types.ts:11` |
-| `Custom` | `"custom"` | 用户自定义事件 | `types.ts:12` |
+| 常量 | 值 | 触发点 |
+|---|---|---|
+| `Idle` | `idle` | 会话空闲超过 `idleDelayMs` 后由调度器回调 |
+| `Question` | `question` | `handleToolBefore()` 匹配 `questionToolNames` 时 |
+| `Permission` | `permission` | 预留，无内置触发点 |
+| `Error` | `error` | 总线 `event:session.error` |
+| `DispatchComplete` | `dispatch_complete` | 派发任务完成 |
+| `DispatchProgress` | `dispatch_progress` | 预留，无内置触发点 |
+| `LoopComplete` | `loop_complete` | 循环收尾 |
+| `ApprovalPending` | `approval_pending` | 图进入等待审批状态时由 `handleApprovalPending()` 发出 |
+| `SessionDeleted` | `session_deleted` | 预留，无内置触发点 |
+| `Custom` | `custom` | 调用方自定义 |
 
-### 事件级别配置
-
-```typescript
-// src/notifications/types.ts:164-177
-interface NotificationEventConfig {
-  enabled: boolean;
-  channels?: NotificationChannelConfig[];     // 事件专属通道，覆盖全局
-  titleTemplate?: string;                      // 标题模板（{{var}} 语法）
-  messageTemplate?: string;                    // 消息模板（{{var}} 语法）
-  throttle?: Partial<ThrottleConfig>;          // 事件专属节流
-  quietHoursOverride?: QuietHoursConfig;       // 事件专属安静时段
-}
-```
-
-```jsonc
-"events": {
-  "error": {
-    "enabled": true,
-    "channels": [{ "kind": "webhook", "enabled": true, "url": "..." }],
-    "throttle": { "windowMs": 60000, "maxPerWindow": 5 },
-    "quietHoursOverride": { "enabled": false }  // 错误通知不遵循安静时段
-  },
-  "question": {
-    "enabled": true,
-    "titleTemplate": "需要你的回答",
-    "messageTemplate": "代理 {{agent}} 在会话 {{sessionId}} 中有问题"
-  }
-}
-```
-
----
+`approval_pending` 走标准 `notify()` 路径，因此同样受安静时段、节流与事件过滤约束；它通过 `templateVars` 注入 `graph_id` 与 `node_id`，`node_id` 在图级接缝上可能为空字符串。
 
 ## 4. 通道类型
 
-系统内置 6 种通知通道（`src/notifications/types.ts:28-35`），每个通道在 `src/notifications/channels/` 下有独立实现。
+`NotificationChannelKind` 同样是开放字符串类型，6 个内置通道各有独立实现，此外扩展点 `notification_channels` 可以通过 `registerChannelFactory()` 注册自定义工厂。
 
-| 通道类型 | 值 | 源码文件 | 用途 |
-|----------|-----|----------|------|
-| SystemToast | `"system_toast"` | `channels/system-toast.ts` | 原生 OS 桌面通知 |
-| Sound | `"sound"` | `channels/sound.ts` | 播放提示音 |
-| CustomCommand | `"custom_command"` | `channels/custom-command.ts` | 执行任意 shell 命令 |
-| Webhook | `"webhook"` | `channels/webhook.ts` | POST 请求到指定 URL |
-| File | `"file"` | `channels/file.ts` | 追加写入 JSONL 文件 |
-| Log | `"log"` | `channels/log.ts` | 写入 rolebox 日志系统 |
+| 通道 | `kind` 值 | 模块 | 用途 |
+|---|---|---|---|
+| SystemToast | `system_toast` | `src/notifications/channels/system-toast.ts` | 原生桌面通知 |
+| Sound | `sound` | `src/notifications/channels/sound.ts` | 播放提示音 |
+| CustomCommand | `custom_command` | `src/notifications/channels/custom-command.ts` | 执行任意 shell 命令 |
+| Webhook | `webhook` | `src/notifications/channels/webhook.ts` | JSON POST 到指定 URL |
+| File | `file` | `src/notifications/channels/file.ts` | 追加写 JSONL 文件 |
+| Log | `log` | `src/notifications/channels/log.ts` | 写 rolebox 日志系统 |
 
-### 4.1 SystemToast — 原生系统通知
+通道配置是判别联合：`kind` 决定其余字段。
 
-平台自适应的桌面通知，按操作系统选择不同的底层命令：
-
-- **macOS**：先尝试 `terminal-notifier`，回退到 `osascript`
-- **Linux**：使用 `notify-send`（libnotify）
-- **Windows**：使用 PowerShell 调用 `BurntToast` 或原生通知
-
-```jsonc
-{ "kind": "system_toast", "enabled": true }
+```yaml
+channels:
+  - kind: system_toast
+    enabled: true
+  - kind: sound
+    enabled: true
+    soundPath: /usr/share/sounds/freedesktop/stereo/complete.oga
+  - kind: webhook
+    enabled: true
+    url: https://hooks.slack.com/services/T00/B00/xxx
+    headers: { Authorization: "Bearer {env:TOKEN}" }
+    timeoutMs: 5000
+  - kind: custom_command
+    enabled: true
+    command: curl -X POST -d "$NOTICE_BODY" http://localhost:8080/notify
+    passAsStdin: false
+    env: { MY_CUSTOM_KEY: value }
+  - kind: file
+    enabled: true
+    path: /tmp/rolebox-notifications.jsonl
+  - kind: log
+    enabled: true
+    level: info
 ```
 
-标题截断至 256 字符，正文截断至 4000 字符（`system-toast.ts:35-36`）。
+| 通道 | 字段 | 默认值 | 说明 |
+|---|---|---|---|
+| `system_toast` | `enabled` | — | 无可用发送器时该通道返回 `null`（不创建） |
+| `sound` | `soundPath`、`enabled` | — | 无可用播放器时不创建 |
+| `webhook` | `url`、`headers?`、`timeoutMs?` | `timeoutMs: 5000` | 正文为完整 `NotificationMessage` 的 JSON，`Content-Type: application/json` |
+| `custom_command` | `command`、`passAsStdin?`、`env?` | 命令超时 10 秒 | 通知内容以 `NOTICE_*` 环境变量传入；`passAsStdin: true` 时整条消息 JSON 从 stdin 进入 |
+| `file` | `path` | — | 每行一条 `NotificationMessage` JSON，自动创建父目录 |
+| `log` | `level?` | `info` | 日志格式为 `[eventType] title — body` |
 
-### 4.2 Sound — 提示音
+`custom_command` 注入的环境变量为 `NOTICE_TITLE`、`NOTICE_BODY`、`NOTICE_SESSION_ID`、`NOTICE_EVENT_TYPE`、`NOTICE_AGENT`、`NOTICE_ROLE_NAME`、`NOTICE_TIMESTAMP`。
 
-播放通知声音文件：
+### 4.1 平台选择与降级
 
-```jsonc
-{
-  "kind": "sound",
-  "enabled": true,
-  "soundPath": "/usr/share/sounds/freedesktop/stereo/complete.oga"
-}
+`src/notifications/platform.ts` 在 PATH 中解析命令并缓存结果，`createChannel()` 按平台决定实例：
+
+| 平台 | 桌面通知 | 提示音 |
+|---|---|---|
+| macOS | `terminal-notifier`，缺失时回退 `osascript` | `afplay` |
+| Linux | `notify-send` | `paplay`，失败时回退 `aplay` |
+| Windows | `powershell` 内联脚本（`Windows.UI.Notifications.ToastNotificationManager`） | `powershell` 的 `System.Media.SoundPlayer` |
+| 其它 | 不创建通道 | 不创建通道 |
+
+降级是逐层的：平台未知、主命令缺失时 `createChannel()` 直接返回 `null`，该通道被静默跳过；Sound 在 Linux 上的 `paplay` → `aplay` 回退发生在 `send()` 内部；SystemToast 在 macOS 上把 `osascript` 作为第二发送器交给通道实现，两者都失败只记警告。
+
+## 5. 安静时段
+
+`QuietHours.isQuiet()` 在任一范围命中时返回 `true`，`nextActiveTime()` 返回当前静音范围的结束时间（未处于静音时返回 `null`）。时间与星期都按配置的 IANA 时区计算；时区无法识别时回退本地时间并记警告。
+
+```yaml
+quietHours:
+  enabled: true
+  timezone: Europe/Berlin
+  ranges:
+    - start: "22:00"
+      end: "07:00"
+    - start: "09:00"
+      end: "17:00"
+      days: [Sat, Sun]
 ```
 
-播放器按平台选择（`sound.ts:37-51`）：
-- **macOS**：`afplay`
-- **Linux**：先尝试 `paplay`（PulseAudio），回退到 `aplay`（ALSA）
-- **Windows**：PowerShell `SoundPlayer`
+| 范围形态 | 示例 | 判定 |
+|---|---|---|
+| 同日范围 | `09:00`–`17:00` | `start <= now < end` |
+| 跨午夜范围 | `22:00`–`08:00` | `now >= start` 或 `now < end` |
+| 全天范围 | `00:00`–`00:00` | `start === end` 视为 24 小时静音 |
+| 按日筛选 | `days: ["Sat", "Sun"]` | 星期缩写匹配（`Intl.DateTimeFormat` 的 `en-US` 短星期） |
 
-### 4.3 CustomCommand — 自定义命令
+事件级 `quietHoursOverride` 存在时，`notify()` 用覆盖配置临时构造一个 `QuietHours` 实例做判定，而不是复用全局实例。
 
-执行任意 shell 命令，通过环境变量传递通知内容（`custom-command.ts:32-40`）：
+## 6. 节流
 
-| 环境变量 | 值 |
-|----------|-----|
-| `NOTICE_TITLE` | 通知标题 |
-| `NOTICE_BODY` | 通知正文 |
-| `NOTICE_SESSION_ID` | 会话 ID |
-| `NOTICE_EVENT_TYPE` | 事件类型 |
-| `NOTICE_AGENT` | 代理名称 |
-| `NOTICE_ROLE_NAME` | 角色名称 |
-| `NOTICE_TIMESTAMP` | ISO 8601 时间戳 |
+节流的键是 `sessionID:eventType`，可全局配置，也可按事件类型覆盖：
 
-```jsonc
-{
-  "kind": "custom_command",
-  "enabled": true,
-  "command": "curl -X POST -d \"$NOTICE_BODY\" http://localhost:8080/notify",
-  "passAsStdin": false,
-  "env": { "MY_CUSTOM_KEY": "value" }
-}
+```yaml
+throttle:
+  windowMs: 3000
+  maxPerWindow: 3
+  perEventType:
+    error: { windowMs: 60000, maxPerWindow: 10 }
+    dispatch_complete: { windowMs: 1000, maxPerWindow: 1 }
 ```
 
-当 `passAsStdin` 为 `true` 时，完整 `NotificationMessage` 的 JSON 序列化通过 stdin 传入。命令默认超时 10 秒（`custom-command.ts:54`）。
+判定规则按顺序为：
 
-### 4.4 Webhook — HTTP POST
+1. **滚动窗口**：每个键维护时间戳队列，窗口内条数达到 `maxPerWindow` 时丢弃新通知。
+2. **硬最小间隔**：同一键的相邻通知至少间隔 1000 ms（常量硬编码在 `src/notifications/throttle.ts`）。
+3. **惰性清理**：每次 `allow()` 调用顺带清掉超出窗口的旧时间戳。
+4. **周期清理**：每 5 分钟做一次全量修剪。
 
-向指定 URL 发送 JSON POST 请求（`webhook.ts:25-33`）：
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `windowMs` | `3000` | 滚动窗口长度 |
+| `maxPerWindow` | `3` | 窗口内最大通知数 |
+| `perEventType` | 无 | 按事件类型覆盖窗口与上限 |
 
-```jsonc
-{
-  "kind": "webhook",
-  "enabled": true,
-  "url": "https://hooks.slack.com/services/T00/B00/xxx",
-  "headers": { "Authorization": "Bearer {env:TOKEN}" },
-  "timeoutMs": 5000
-}
-```
+被节流丢弃的通知不产生任何输出，也不进入通道分发，因此排查「通知没来」时需要按顺序检查总开关、事件开关、安静时段与节流。
 
-默认超时 5000ms（`webhook.ts:21`），默认 Content-Type 为 `application/json`。POST 正文为 `NotificationMessage` 完整 JSON。
+## 7. 空闲检测
 
-### 4.5 File — 文件日志
+`scheduleIdleNotification()` 为每个会话注册一个空闲定时器，定时器触发时调用 `notify()` 发 `idle` 事件。用户消息与消息更新都会通过 `markActivity()` 重置倒计时。
 
-将通知以 JSONL 格式追加写入文件（`file.ts:18-26`），自动创建目标目录：
+| 守卫 | 作用 |
+|---|---|
+| 版本计数器 | 每次调度递增版本，过期回调静默忽略 |
+| `notifiedSessions` | 同一会话不重复通知 |
+| `executingNotifications` | 防止回调重叠执行 |
+| `sessionActivitySinceIdle` | 调度之后出现的活动阻止通知 |
+| 宽限期 | 活动在调度后 `activityGracePeriodMs`（默认 100 ms）内到达时不取消定时器，避免抖动 |
 
-```jsonc
-{
-  "kind": "file",
-  "enabled": true,
-  "path": "/tmp/rolebox-notifications.jsonl"
-}
-```
-
-每行一条 JSON，格式为完整的 `NotificationMessage` 结构。
-
-### 4.6 Log — 控制台日志
-
-写入 rolebox 内部日志系统（`log.ts:15-31`），可选日志级别：
-
-```jsonc
-{
-  "kind": "log",
-  "enabled": true,
-  "level": "info"  // info | warn | error | debug
-}
-```
-
-日志格式：`[eventType] title — body`
-
----
-
-::: tip 调试通知配置
-要验证当前的通知配置是否生效，可以手动触发一条测试通知：通过 `|signal| type=progress payload={"test": true}` 发送一条信号。如果配置正确，NotificationManager 会按照当前的事件过滤、节流和安静时段设置在对应的通道上发出通知。也可以查看日志前缀 `notification:` 的诊断输出。
-:::
-
-## 5. 安静时段 (Quiet Hours)
-
-安静时段在指定时间范围内静音通知，由 `QuietHours` 类（`quiet-hours.ts:86-91`）实现。
-
-```typescript
-// src/notifications/types.ts:60-65
-interface QuietHoursConfig {
-  enabled: boolean;
-  timezone?: string;                    // IANA 时区（如 "America/New_York"）
-  ranges: QuietHoursRange[];           // 安静时段范围列表
-}
-
-interface QuietHoursRange {
-  start: string;                        // HH:MM 格式，24 小时制
-  end: string;                          // HH:MM 格式，24 小时制
-  days?: string[];                      // 工作日缩写（Mon/Tue/...），省略则每日有效
-}
-```
-
-### 支持的时间范围类型
-
-| 范围类型 | 示例 | 说明 |
-|----------|------|------|
-| 正常范围 | `22:00`–`08:00` | 午夜交叉，跨天有效 |
-| 同日范围 | `09:00`–`17:00` | 同一天内有效 |
-| 全天范围 | `00:00`–`00:00` | start === end，24 小时静默 |
-| 按日筛选 | `start:"22:00"` `end:"08:00"` `days:["Sat","Sun"]` | 仅周末生效 |
-
-```jsonc
-"quietHours": {
-  "enabled": true,
-  "timezone": "Europe/Berlin",
-  "ranges": [
-    { "start": "22:00", "end": "07:00" },                     // 工作日夜晚
-    { "start": "09:00", "end": "17:00", "days": ["Sat","Sun"] }  // 周末白天
-  ]
-}
-```
-
-### 时区处理
-
-通过 `Intl.DateTimeFormat` 的 `timeZone` 选项（`quiet-hours.ts:36-47, 53-73`）实现时区感知计算。未识别时区会回退到系统本地时区并记录警告。
-
-### `nextActiveTime()`
-
-`QuietHours` 提供 `nextActiveTime(now?)` 方法（`quiet-hours.ts:160-196`），返回当前安静时段的结束时间（`Date` 对象），在收到"通知已延迟"的回复时提供"将在 XX 时恢复通知"的信息。
-
----
-
-## 6. 节流控制 (Throttle)
-
-节流防止短时大量通知轰炸，由 `NotificationThrottle` 类（`throttle.ts:38-64`）实现。
-
-```typescript
-// src/notifications/types.ts:69-81
-interface ThrottleConfig {
-  windowMs: number;                                             // 时间窗口（毫秒）
-  maxPerWindow: number;                                         // 窗口内最大通知数
-  perEventType?: Record<string, { windowMs: number; maxPerWindow: number }>;  // 按事件类型覆盖
-}
-```
-
-### 默认值
-
-| 参数 | 默认值 | 来源 |
-|------|--------|------|
-| `windowMs` | `3000`（3 秒） | `constants.ts:135` |
-| `maxPerWindow` | `3` | `constants.ts:136` |
-
-### 节流规则
-
-1. **滚动窗口速率限制**：每个 `sessionID:eventType` 组合维护一个时间戳队列，超过 `maxPerWindow` 的请求被静默丢弃（`throttle.ts:97-103`）
-2. **硬最小间隔**：相同 `sessionID:eventType` 的相邻通知间隔至少 1000ms（`throttle.ts:105-109`）
-3. **自动过期清理**：每次 `allow()` 调用自动清理超出时间窗口的旧时间戳（`throttle.ts:82-90`）
-4. **周期性全量清理**：每 5 分钟运行一次全面修剪（`throttle.ts:57-63`）
-
-### 事件级别覆盖
-
-```jsonc
-"throttle": {
-  "windowMs": 3000,
-  "maxPerWindow": 3,
-  "perEventType": {
-    "error": { "windowMs": 60000, "maxPerWindow": 10 },
-    "dispatch_complete": { "windowMs": 1000, "maxPerWindow": 1 }
-  }
-}
-```
-
-```mermaid
-flowchart LR
-    A[通知触发] --> B{allow?}
-    B -->|yes| C[记录时间戳<br>加入队列]
-    B -->|no| D[静默丢弃]
-    C --> E[通道分发]
-    subgraph Throttle[速率判定]
-        F[滚动窗口<br>maxPerWindow] --> B
-        G[硬最小间隔<br>1000ms] --> B
-    end
-```
-
----
-
-## 7. 空闲检测 (Idle Detection)
-
-空闲检测在用户离开时（会话无活动超过 `idleDelayMs`）触发 `Idle` 类型通知。
-
-### 核心机制
-
-`NotificationScheduler`（`scheduler.ts:44-79`）管理每个会话的空闲定时器：
-
-```typescript
-// src/notifications/scheduler.ts:131-172
-scheduleIdleNotification(sessionID: string, onFire: () => void): void
-```
-
-### 防重复机制
-
-| 防护措施 | 说明 | 源码位置 |
-|----------|------|----------|
-| 版本计数器 | 每次调度递增版本号，过期回调静默忽略 | `scheduler.ts:61, 157-158, 194-199` |
-| 已通知集合 | `notifiedSessions` 防止同一会话重复通知 | `scheduler.ts:52, 220` |
-| 执行中锁 | `executingNotifications` 防止重叠执行 | `scheduler.ts:64, 187-192` |
-| 活动回退 | `sessionActivitySinceIdle` 在调度后出现的活动阻止通知触发 | `scheduler.ts:58, 201-209` |
-| 宽限期 | 活动在调度后 `activityGracePeriodMs`（默认 100ms）内到达不取消定时器 | `scheduler.ts:34, 95-106` |
-
-### 活动标记
-
-```typescript
-// manager.ts:203-205
-markActivity(sessionID: string): void
-```
-
-通过 `handleMessageUpdated` 和 `handleChatMessage` 间接调用（`manager.ts:245-251`），每次用户发消息或消息被更新时重置空闲倒计时。
-
-### 会话清理
-
-`handleSessionDeleted`（`manager.ts:228-231`）在会话删除时清理调度器和节流状态。`cleanupOldSessions`（`scheduler.ts:300-348`）在达到 `maxTrackedSessions`（默认 100）时按 LRU 策略淘汰旧会话。
-
----
+会话删除时 `handleSessionDeleted()` 清理调度器与节流状态。调度器跟踪的会话数超过 `maxTrackedSessions`（默认 100）时按 LRU 淘汰最久未活动的会话。
 
 ## 8. 生命周期与热加载
 
-### 生命周期流程图
-
 ```mermaid
 stateDiagram-v2
-    [*] --> Init: constructor()
-    Init --> Active: notifications enabled
+    [*] --> Active: 构造 + 订阅总线
     Active --> Dispatching: notify()
-    Dispatching --> Throttled: throttle.allow = false
-    Throttled --> Active: next event
-    Dispatching --> Quiet: quietHours.isQuiet = true
-    Quiet --> Active: quiet period ends
-    Dispatching --> ChannelSend: Promise.allSettled
-    ChannelSend --> Active: all channels done
+    Dispatching --> Active: 守卫拦截（返回）
+    Dispatching --> Active: 通道分发完成
     Active --> Disposed: dispose()
     Disposed --> [*]
-
-    state Active {
-        [*] --> EventReceive
-        EventReceive --> GuardCheck: 5 guards
-        GuardCheck --> ContentBuild: all passed
-        ContentBuild --> ChannelDispatch: message ready
-    }
 ```
 
-### 热加载
+- **装配**：`NotificationService.init()` 解析配置、创建 manager，然后订阅总线的 `hook:chat.message`、`hook:tool.execute.before`、`event:session.idle`、`event:session.error`、`event:session.deleted`、`event:message.updated`；每个订阅都包在 try/catch 中，通知失败不影响主流程。
+- **热加载**：`reloadConfig()` 替换全局与角色配置，重建 throttle 与 quietHours 实例，用新的 `idleDelayMs` 重建调度器，并清空通道缓存；下一次通知按新配置重新创建通道。
+- **释放**：`dispose()` 停止调度器定时器、清理节流数据、对每个已缓存通道调用 `dispose()`，最后清空缓存。
 
-`reloadConfig()`（`manager.ts:338-356`）支持运行时热加载通知配置：
+`notify()` 本身永不向外抛异常：所有异常在顶层被捕获并降级为警告日志。
 
-1. 更新全局和角色级配置
-2. 重新创建 `Throttle` 和 `QuietHours` 实例
-3. 重建 `Scheduler` 并更新空闲延迟
-4. 清空通道缓存（下次通知时按新配置重建）
+## 9. 通道路由与缓存
 
-### 资源释放
+`resolveChannels()` 以 agent 为缓存键（无角色时用 `__global__`）。缓存里存的是创建中的 Promise，因此并发通知不会重复创建通道；创建失败时删除缓存项并返回空数组。通道配置为空数组时 `notify()` 在分发前就返回。
 
-`dispose()`（`manager.ts:364-384`）按顺序清理：
-1. 停止调度器所有定时器
-2. 清除节流数据及定时器
-3. 调用每个缓存通道的 `dispose()`
-4. 清空通道缓存
+### 当前实现边界
 
----
+- `mainSessionOnly` 在类型、默认值、解析与合并路径上都存在，但 v1.9.0 的分发路径没有任何读取点：把它设为 `true` 或 `false` 都不会改变通知行为。
+- 未在 `VALID_NOTIFICATION_EVENT_TYPES` 中的事件类型不会静默丢弃，`notify()` 会记一条 `Unknown notification event type` 警告后返回。
+- `permission`、`dispatch_progress`、`session_deleted` 三个内置事件类型只保留了常量，没有内置触发点，需要调用方显式发出或通过 `events` 配置接管。
 
-## 9. 通道路由与解析
+## 10. 观测
 
-### 通道创建
+`rolebox monitor --show-notifications` 渲染通知状态面板（启用状态、安静时段、节流统计、最近事件），面板实现位于 `src/cli/commands/renderer/status-format.ts`。图审批门是最容易复现的触发路径：让一个 `needs_approval` 节点进入等待即触发 `approval_pending`。
 
-`createChannels` 根据操作系统和已安装的命令选择可用的通道实现。`resolveChannels`（`manager.ts:193-198`）通过 `channelCache` 做缓存，防止并发通知导致重复创建。
+## 相关页面
 
-```mermaid
-flowchart TD
-    A[通知触发] --> B{channels 数组}
-    B -->|长度 0| C[静默返回]
-    B -->|有通道| D[resolveChannels]
-    D --> E{缓存命中?}
-    E -->|是| F[使用缓存实例]
-    E -->|否| G[创建新实例]
-    G --> H[存入缓存]
-    H --> F
-    F --> I[Promise.allSettled<br>并行分发]
-    I --> J[单个失败?]
-    J -->|是| K[日志警告]
-    J -->|否| L[完成]
-```
-
-### 通道降级
-
-SystemToast 和 Sound 通道具备自动降级能力：
-- **SystemToast**（`system-toast.ts:38-71`）：macOS 先尝试 `terminal-notifier`，回退到 `osascript`；两个都失败则记录警告
-- **Sound**（`sound.ts:36-51`）：Linux 先尝试 `paplay`，回退到 `aplay`
-
----
-
-## 10. 平台适配
-
-`detectPlatform()` 在 `NotificationManager` 构造函数中调用，返回：
-
-```typescript
-// src/notifications/types.ts:45-47
-interface PlatformInfo {
-  os: "darwin" | "linux" | "win32" | "unknown";
-}
-```
-
-系统根据平台选择不同的底层命令策略（`manager.ts:69-80`）：
-
-| 平台 | 系统通知 | 声音播放 |
-|------|----------|----------|
-| macOS (darwin) | `terminal-notifier` → `osascript` | `afplay` |
-| Linux | `notify-send` | `paplay` → `aplay` |
-| Windows (win32) | PowerShell 脚本 | PowerShell `SoundPlayer` |
-
----
-
-## 核心要点
-
-| 维度 | 关键信息 |
-|------|----------|
-| **核心架构** | NotificationManager 统一管理事件接收 → 节流 → 安静时段检查 → 空闲调度 → 通道分发 |
-| **事件类型** | 9 种事件：chat.message、tool.before/after 等 hook 事件 + session.idle/error 等生命周期事件 |
-| **通道支持** | 6 种通道：SystemToast（各平台原生）、Sound、Webhook、File、Log、CustomCommand |
-| **安静时段** | 支持全局和事件级别的安静时段配置，时区感知，跨天/全天范围 |
-| **节流机制** | 按事件类型独立控制（突发上限 + 稳态速率），报告间隔 2s，去重窗口 5s |
-
-## 引用索引
-
-| 引用 | 文件 | 行号 |
-|------|------|------|
-| 事件类型定义 | `src/notifications/types.ts` | 3-13 |
-| 通道类型定义 | `src/notifications/types.ts` | 28-35 |
-| 完整类型定义 | `src/notifications/types.ts` | 1-198 |
-| NotificationManager 类 | `src/notifications/manager.ts` | 38-385 |
-| 构造函数 | `src/notifications/manager.ts` | 51-81 |
-| 配置解析 | `src/notifications/manager.ts` | 92-100 |
-| 通知主流程 | `src/notifications/manager.ts` | 111-184 |
-| 空闲调度 | `src/notifications/manager.ts` | 213-223 |
-| 热加载 | `src/notifications/manager.ts` | 338-356 |
-| 资源释放 | `src/notifications/manager.ts` | 364-384 |
-| 安静时段类 | `src/notifications/quiet-hours.ts` | 86-234 |
-| 时区处理 | `src/notifications/quiet-hours.ts` | 35-73 |
-| 节流类 | `src/notifications/throttle.ts` | 38-214 |
-| 默认节流参数 | `src/notifications/throttle.ts` | 14-18 |
-| 调度器类 | `src/notifications/scheduler.ts` | 44-349 |
-| 空闲定时器 | `src/notifications/scheduler.ts` | 131-172 |
-| 版本计数器 | `src/notifications/scheduler.ts` | 194-199 |
-| 最大跟踪会话 | `src/notifications/scheduler.ts` | 300-348 |
-| 配置解析 | `src/notifications/config.ts` | 72-158 |
-| 配置合并 | `src/notifications/config.ts` | 212-285 |
-| 环境变量解析 | `src/notifications/config.ts` | 294-296 |
-| 默认配置 | `src/notifications/config.ts` | 43-58 |
-| 配置子解析器 | `src/notifications/config-parsers.ts` | 70-237 |
-| 通道解析器 | `src/notifications/config-parsers.ts` | 115-172 |
-| SystemToast 通道 | `src/notifications/channels/system-toast.ts` | 1-77 |
-| Sound 通道 | `src/notifications/channels/sound.ts` | 1-58 |
-| CustomCommand 通道 | `src/notifications/channels/custom-command.ts` | 1-92 |
-| Webhook 通道 | `src/notifications/channels/webhook.ts` | 1-56 |
-| File 通道 | `src/notifications/channels/file.ts` | 1-29 |
-| Log 通道 | `src/notifications/channels/log.ts` | 1-35 |
-| 常量默认值 | `src/constants.ts` | 134-139 |
-| 问题工具名默认值 | `src/constants.ts` | 139 |
-
----
-
-## 下一步
-
-- [运行时行为](/04-Advanced/runtime-behavior) — 协作图状态机与 dispatch 驱动推进
-- [会话工具](/04-Advanced/session-tools) — 10 工具会话管理套件
-- [兼容性](/04-Advanced/compatibility) — 跨平台兼容性与依赖要求
-- [CLI 参考](/03-Reference/cli) — 命令行工具完整参考
+- [服务架构](/01-Overview/service-architecture) — NotificationService 在 11 个服务中的位置
+- [扩展机制](/03-Reference/extensions) — `notification_channels` 与 `notification_events` 作用域
+- [role.yaml 参考](/03-Reference/role-yaml) — 角色级 `notifications:` 键
+- [工具目录](/03-Reference/tool-catalog) — 触发通知的工具参数
+- [平台与 Harness](/01-Overview/platform-harnesses) — 各 harness 的装配差异

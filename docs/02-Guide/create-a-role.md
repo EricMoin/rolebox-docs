@@ -1,435 +1,242 @@
 ---
 title: 创建角色
-description: 使用 role.yaml 声明式定义 AI 代理角色的完整指南
+description: 从最小可运行的 role.yaml 出发逐字段展开角色定义，并给出三个可直接粘贴的完整配方
 ---
 
-# 创建角色
+# 创建角色（Create a Role）
 
-> **相关文档：** [目录结构](/01-Overview/directory-structure) — 角色目录与文件布局 | [role.yaml 参考](/03-Reference/role-yaml) — 完整字段参考 | [子代理](/02-Guide/subagents) — 多代理协作
+一个 rolebox 角色就是一个目录加一份 `role.yaml`：YAML 声明这个代理是什么、能用哪些能力、能把工作派给谁，剩下的交给运行时。本页从最小可运行的配置开始，逐字段补齐，最后给出三个可直接粘贴的配方。
 
-rolebox 允许你用一份 YAML 文件定义"一个 AI 代理角色"——告诉它是什么、能做什么、以及如何与其它代理协作。每个角色由一个目录和其中的 `role.yaml` 文件表示；你只需编写配置，无需编写代码。
+> 前置：[目录结构](/01-Overview/directory-structure)｜相关：[role.yaml 参考](/03-Reference/role-yaml)、[子代理](/02-Guide/subagents)、[图工作流](/02-Guide/graph-workflows)
 
-::: tip 先认识几个术语
-- **门控（gate）**：函数满足特定条件后才被激活；未满足前函数保持等待（gated）状态。
-- **拓扑（topology）**：多代理协作图（Collaboration Graph）的预设结构模式——pipeline（串行）、review-loop（循环）、star（并行）。
-- **FSM（有限状态机，Finite State Machine）**：描述函数在 active / gated / complete 等状态间转换的模型。
-- **parent**：协作图中的保留名，指编排器（父角色）这个固定节点，是工作流的起点与终点。
-:::
+## 最小可运行的 role.yaml
 
-## 快速开始
-
-创建一个角色目录和 `role.yaml`：
+角色目录放在**角色根目录**下：项目里存在 `rolebox/` 就用它，否则用 harness 配置目录下的 `rolebox/`（opencode 为 `~/.config/opencode/rolebox/`）。角色 ID 就是目录名。
 
 ```bash
-mkdir -p ~/.config/opencode/rolebox/copywriter
+mkdir -p rolebox/copywriter
+```
+```text
+应看到：命令无输出，rolebox/copywriter/ 目录被创建。
 ```
 
 ```yaml
-# ~/.config/opencode/rolebox/copywriter/role.yaml
+# rolebox/copywriter/role.yaml
 name: Copywriter
 description: Writes concise, punchy copy.
 prompt: |
-  You are a copywriter. Short sentences. No jargon. Every word earns its place.
+  You are a copywriter. Short sentences. No jargon.
+  Every word earns its place.
 ```
 
-重启 opencode 后，该角色会出现在代理列表中。
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `name` | string | 是 | 角色显示名，出现在代理列表里 |
+| `description` | string | 是 | 一句话描述，harness 用它向其它代理介绍这个角色 |
+| `prompt` | string | 二选一 | 系统提示词正文 |
+| `prompt_file` | string | 二选一 | 指向提示词文件（相对角色目录），如 `PROMPT.md` |
 
-## 角色模板对比
+`prompt` 与 `prompt_file` 至少要给一个：两个都没给时该角色会被整体跳过，日志里会写明原因。两个都给时以 `prompt_file` 为准；`prompt_file` 指向的文件读不到，角色同样会被跳过，不会回退到 `prompt`。
 
-rolebox 提供三种角色模板，适用于不同的复杂度和场景：
+## 让改动生效
 
-| 维度 | 简单角色 (Simple) | Director 门控角色 | 嵌套状态机角色 |
-|------|-------------------|-------------------|----------------|
-| **适用场景** | 单一任务代理 | 需要审批/阶段转换 | 多函数协作编排 |
-| **复杂度** | 低 | 中 | 高 |
-| **YAML 字段** | name, description, prompt | + functions, hooks | + subagents, collaboration, graph |
-| **函数数量** | 0（使用内置） | 1-3 个自定义 | 3+ 自定义 |
-| **协作图** | 无 | 无 | 需要定义 |
-| **状态管理** | 无 | gate + transition | 完整状态机 |
+- **手工编写的角色**：保存文件后重启 harness。插件在启动时扫描角色根目录下的每一份 `role.yaml`，不需要安装命令。
+- **从注册中心安装的角色**：`rolebox install <role>` 把它记入本机 lock 文件，再用 `rolebox sync <harness>` 把它符号链接进 harness 的角色目录。
 
-### 简单角色示例：代码审查员
+```bash
+rolebox sync opencode
+```
+```text
+应看到：
+Synced 1 roles to opencode
+```
+数字是本机已安装的角色数（一个都没装过时显示 `Synced 0 roles to opencode`）；`opencode` 可换成 `pi` 或 `dsh`。
+
+## 逐字段展开
+
+### mode — 角色以什么身份出现
 
 ```yaml
-# rolebox/code-reviewer/role.yaml
-name: Code Reviewer
-description: Expert code reviewer
-model: gpt-4
 mode: subagent
+```
+
+| 取值 | 行为 |
+|---|---|
+| `primary`（默认） | 作为主代理出现在代理列表 |
+| `subagent` | 只作为可委托的子代理，不主动出现在主列表 |
+| `all` | 两种身份都可用 |
+
+子代理被部署到 harness 时，`mode` 一律写成 `subagent`；要让它同时能当主代理用，就在父角色的 `subagents` 之外单独定义一个角色。
+
+### 模型与采样
+
+```yaml
+model: gpt-4
 temperature: 0.2
-prompt: |
-  You are an expert code reviewer. Review for correctness,
-  performance, and readability. Be specific and actionable.
-skills:
+top_p: 0.95
+variant: thorough
+color: "#4CAF50"
+```
+
+| 字段 | 说明 |
+|---|---|
+| `model` | 模型标识；省略时用 harness 的默认模型，集中管理见[模型别名](/03-Reference/model-aliases) |
+| `temperature` / `top_p` | 采样参数，取值范围分别是 0.0–2.0 与 0.0–1.0 |
+| `variant` / `color` | 模型变体（配置风格）与界面颜色，按 harness 的支持程度生效 |
+
+### 能力：技能与函数
+
+```yaml
+skills:            # 角色目录下 skills/ 里的技能
   - review-checklist
+opencode_skills:   # harness 全局技能目录里的共享技能
+  - humanizer
 functions:
   - plan
-permission:
-  allow: [Read, Grep, Glob]
-```
-
-### 门控角色示例：带审批的审查流程
-
-```yaml
-# rolebox/review-team-approval/role.yaml
-name: Review Team (Approval)
-description: Multi-agent code review with approval gate
-collaboration:
-  topology: review-loop
-  agents: [reviewer, lead]
-  max_iterations: 5
-  termination:
-    any_of:
-      - { max_iterations: 3 }
-      - { result_matches: { agent: lead, contains: "APPROVED" } }
-```
-
-### 嵌套状态机角色示例：目录式子代理
-
-```yaml
-# rolebox/team-lead/role.yaml
-name: Team Lead
-description: Delegates work to specialist sub-agents
-prompt: |
-  You are a team lead. Coordinate work across your sub-agents.
-subagents:
-  - name: Implementer
-    description: Writes production code
-    prompt: You are a senior software engineer. Write clean, testable code.
-    temperature: 0.1
-```
-
-文件式子代理定义在 `subagents/{name}/role.yaml` 目录中，支持嵌套递归发现（`src/loader/subagents.ts:234-325`）：
-
-```yaml
-# team-lead/subagents/researcher/role.yaml
-name: Researcher
-description: Finds and synthesizes information
-prompt: |
-  You are a research specialist. Find accurate, up-to-date information.
-skills:
-  - research-checklist
-```
-
-::: tip 模板选择速查
-如果你不确定该选哪种模板，从**简单角色**开始——它只需要 name、description 和 prompt 三个字段。当你发现需要在多个子代理之间协调工作流时，再升级到 Director 门控角色或嵌套状态机角色。过度设计是 YAML 角色定义中最常见的陷阱，保持简单直到复杂度迫使你升级。
-:::
-
-## 模板选择指南
-
-根据任务的编排复杂度选择合适的模板：
-
-```
-需要创建什么类型的角色？
-├── 单一任务，无子代理
-│   └── → 简单角色 (Simple)
-│       ├── 仅需 prompt + skills，无函数
-│       ├── 示例：tech-writer, code-reviewer
-│       └── YAML: name + description + prompt (± skills)
-│
-├── 需要子代理 + 协作流程，带审批门控
-│   └── → Director 门控角色
-│       ├── 声明 subagents + collaboration topology
-│       ├── 支持 termination 条件（any_of / all_of）
-│       ├── 示例：review-team-approval, review-team-allof
-│       └── YAML: 添加 collaboration, termination
-│
-└── 需要多函数编排 + 嵌套子代理 + 状态机
-    └── → 嵌套状态机角色 (Nested FSM)
-        ├── 支持文件式子代理 (subagents/{name}/role.yaml)
-        ├── 支持递归嵌套发现 (maxDepth=3)
-        ├── 函数级 gate/transition/continue_until
-        ├── 示例：team-lead (含 researcher 子代理)
-        └── YAML: subagents + functions + graph
-```
-
-### 决策要点
-
-| 决策因素 | 简单角色 | Director 门控 | 嵌套状态机 |
-|----------|---------|---------------|-----------|
-| 子代理数量 | 0 | 1-3 个内联 | 3+，可文件式 |
-| 协作拓扑 | 无 | review-loop | 自定义 flow |
-| 函数 gate/transition | 不需要 | 可选 | 核心机制 |
-| 多轮审批 | 不支持 | 内置 | 配合函数实现 |
-| 嵌套子代理 | 不支持 | 不支持 | 支持 |
-
-## 完整 schema 字段
-
-| 字段 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `name` | string | 是 | 角色名称 |
-| `description` | string | 是 | 角色描述，显示在代理列表中 |
-| `prompt` | string | 否 | 系统提示（与 `prompt_file` 互斥） |
-| `prompt_file` | string | 否 | 外部提示文件路径 |
-| `model` | string | 否 | 模型标识（如 `gpt-4`、`claude-3-sonnet`） |
-| `mode` | string | 否 | `primary` / `subagent` / `all`，默认 `primary` |
-| `temperature` | number | 否 | 0.0 - 2.0 |
-| `top_p` | number | 否 | 0.0 - 1.0 |
-| `color` | string | 否 | UI 颜色 |
-| `version` | string | 否 | 语义化版本 |
-| `functions` | string[] | 否 | 启用函数（与内置合并，非替换） |
-| `disable_functions` | string[] | 否 | 禁用特定内置函数 |
-| `skills` | string[] | 否 | 角色级技能引用 |
-| `opencode_skills` | string[] | 否 | 全局技能引用 |
-| `references` | object | 否 | 显式引用声明 |
-| `subagents` | array | 否 | 内联子代理定义 |
-| `hooks` | object | 否 | 自定义 hook 配置 |
-| `collaboration` | object | 否 | 协作图配置 |
-| `dispatch` | object | 否 | 调度配置覆盖 |
-| `permission` | object | 否 | 工具权限控制 |
-
-## 函数配置
-
-`functions:` 字段与内置默认值**合并**而非替换：
-
-```yaml
-functions:
-  - plan                   # 内置 — 明确列出
-  - review                 # 自定义函数
-  - my-custom-fn           # 从 roleDir/functions/ 加载
-
-# 禁用特定内置函数
+  - review
 disable_functions:
-  - execute                # 从最终集合中移除 execute
+  - loop
 ```
 
-行为规则（来自 `docs/functions.md:85-89`）：
-- `functions: [my-fn]` → 启用 = `[plan, execute, loop, my-fn]`（合并去重）
-- `functions: [plan, my-fn]` → 启用 = `[plan, execute, loop, my-fn]`（重复项移除）
-- `disable_functions: [execute]` → 从合并结果中移除 execute
-- 未声明 `functions:` 字段时，默认使用 `[plan, execute, loop]`
+`functions:` 是**合并**语义而不是替换：最终启用集合 = `plan`、`execute`、`loop` 三个内置函数 ∪ 你列出的函数（自动去重）。想移除内置函数，只能写进 `disable_functions`。技能与函数各自放在哪一层目录、按什么顺序解析，见[目录结构](/01-Overview/directory-structure)、[技能系统](/02-Guide/skills)与[函数系统](/02-Guide/functions)。
 
-## 环境变量插值
-
-在 role.yaml 中使用 `{env:VARIABLE_NAME}` 语法进行环境变量插值，启动时解析：
+### 引用文档与子代理
 
 ```yaml
-model: "{env:PREFERRED_MODEL}"
-prompt: |
-  You work for {env:COMPANY_NAME}, a {env:INDUSTRY} company.
-
-dispatch:
-  maxConcurrent: "{env:DISPATCH_CONCURRENCY}"
-```
-
-插值规则：
-- 不存在的环境变量会保留为字面字符串（`{env:UNDEFINED_VAR}`）
-- 支持嵌套在字符串中的任意位置
-- 解析发生在启动阶段 `src/resolver/env-resolver.ts`
-
-## 模式选择
-
-角色通过 `mode` 字段控制其在代理列表中的呈现与可委托性（枚举值定义于 `src/constants.ts:3-9`）：
-
-| 模式 | 值 | 行为 |
-|------|-----|------|
-| **primary** | `primary`（默认） | 作为主代理出现在代理列表中 |
-| **subagent** | `subagent` | 标记为子代理，不主动作为主代理出现，供父角色委托 |
-| **all** | `all` | 同时以主代理和可委托子代理的身份可用 |
-
-未声明 `mode` 时默认值为 `primary`。角色通过 `dispatch` / `graph_*` 委托子代理时，子代理的 `mode` 通常为 `subagent` 或在协作图中由 `parent` 关联。
-
-## 子代理字段继承规则
-
-子代理通过 `applyInheritance`（`src/loader/role-loader.ts:95-159`）从父角色继承一组**可继承字段**。当子代理未显式设置这些字段时，会回退到父角色的值。
-
-### 字段继承行为
-
-| 字段 | 继承行为 |
-|------|----------|
-| `model`、`color`、`variant` | **从父角色继承**（未显式声明时） |
-| `temperature`、`top_p` | **从父角色继承**（未显式声明时） |
-| `permission`、`tools` | **从父角色继承**（未显式声明时） |
-| `name`、`description` | **不继承** — 子代理必须提供 |
-| `prompt` / `prompt_file` | **不继承** — 必须显式提供其一 |
-| `skills`、`opencode_skills` | **不继承** — 需显式声明 |
-| `functions`、`disable_functions` | **不继承** — 需显式声明 |
-| `subagents`、`auto_activate`、`locked` | **不继承** — 需显式声明 |
-
-可继承字段列表定义于 `src/constants.ts:123-131`（`INHERITABLE_FIELDS`）；每个子代理的必需字段（`name` + `prompt`/`prompt_file`）由 `resolveSubagentEntry` 校验（`src/loader/subagents.ts:40-88`）。
-
-### 继承原则
-
-1. **子代理继承可继承字段**：父角色的 `model`、`temperature`、`permission`、`tools` 等会自动传播，除非子代理显式覆盖
-2. **非继承字段需显式声明**：`skills`、`functions`、`prompt` 等不会从父角色传播，必须由子代理自行声明
-3. **嵌套继承**：内联子代理可以拥有自己的 `subagents`，形成递归嵌套（`src/loader/subagents.ts:142-181`）
-4. **文件式发现**：子代理可以通过 `subagents/{name}/role.yaml` 文件定义，支持 `maxDepth=3` 的递归发现（`src/loader/subagents.ts:235-326`）
-
-```yaml
-# 父角色 — 声明 model 和 permission；子代理未声明时继承这些值
-name: Team Lead
-model: gpt-4
-permission:
-  allow: [Read, Grep, Glob, Bash, Edit]
+references:
+  style-guide: references/style-guide.md
 subagents:
   - name: Researcher
-    description: Researches code patterns
-    model: claude-3-haiku       # 显式覆盖父角色的 model
-    prompt: Research the code...
-    # Researcher 未声明 permission → 继承父角色的 [Read, Grep, Glob, Bash, Edit]
+    description: Finds and synthesizes information
+    prompt: You are a research specialist. Cite your sources.
 ```
 
-## 权限配置
+`references/` 目录里的 Markdown 会被自动发现，`references:` 的显式声明与之**合并**：同名文件用显式声明补描述，也可以借此指向 `references/` 之外的文件。`subagents:` 只声明参与者，不声明流程；流程在运行时用图工具搭建，详见[子代理](/02-Guide/subagents)与[图工作流](/02-Guide/graph-workflows)。
+
+### 权限
 
 ```yaml
 permission:
-  allow:
-    - Read
-    - Grep
-  deny:
-    - Bash
+  allow: [Read, Grep, Glob]
+  deny: [Edit, Write, Bash]
 tools:
   Bash: false
 ```
 
-## 完整示例
+`permission.allow` / `permission.deny` 是工具名清单，rolebox 会把它转换成 harness 的逐工具权限配置（工具名转小写后映射为 `allow` / `deny`），真正的拦截由 harness 执行；`tools` 是「工具名 → 是否启用」的映射。
+
+### 自动化：auto_activate 与 locked
 
 ```yaml
-name: Team Lead
-description: Orchestrates multi-agent code review
-model: gpt-4
-mode: primary
-prompt: |
-  You are a team lead. Coordinate reviewer and researcher
-  agents to deliver comprehensive code reviews.
-skills:
-  - review-checklist
-functions:
-  - plan
-  - execute
-references:
-  api-spec: references/api-spec.md
-subagents:
-  - name: researcher
-    description: Researches code patterns
-    prompt: Research the relevant code...
-hooks:
-  custom:
-    - name: quality-check
-      events: [tool.execute.after]
-      module: hooks/quality-checker.js
-      phase: after
-permission:
-  allow: [Read, Grep, Glob, Bash, Edit]
+auto_activate:
+  - review
+locked: true
 ```
 
-## 常见模式
+`auto_activate` 让这些函数在会话启动时直接处于激活状态，无需用户输入 `|name|`；`locked: true` 保证它们不会被状态迁移或用户意外关掉。
 
-### 模式 1：只读代理（Read-only Agent）
-
-适用于代码审查、文档分析等只需读取不修改的场景：
+### 编排与调度两个键
 
 ```yaml
+graph:
+  orchestration: graph_v2
+dispatch:
+  backgroundStaleTimeoutMs: 900000
+```
+
+`graph:` 目前是前向兼容占位：解析器认识这个键，但还没有接入图解析，当前没有运行时效果——多代理编排一律走命令式 `graph_*` 工具（见[图工作流](/02-Guide/graph-workflows)）。`dispatch:` 只接受 `backgroundStaleTimeoutMs` 与 `syncPromptTimeoutMs` 两个键，其余键会被忽略，细节见[调度配置](/03-Reference/dispatch-config)。
+
+### 环境变量插值
+
+```yaml
+model: "{env:PREFERRED_MODEL}"
+prompt: |
+  You work for {env:COMPANY_NAME}.
+```
+
+`{env:NAME}` 在启动时解析，可以出现在任意字符串位置；变量不存在时占位符原样保留，并写一条日志。
+
+### 其余字段
+
+`version`（语义化版本）、`memory`（角色级记忆的持久化与注入）、`notifications`（会话生命周期通知）、`copilot`（统一回合结束决策管道）、`hooks`（自定义生命周期 Hook）、`extensions`（注册自定义条件 / 拓扑 / 通知通道）、`open` / `exports` / `open_roles`（跨角色发现）都有完整的字段说明，见 [role.yaml 参考](/03-Reference/role-yaml)；使用场景见 [Hook 机制](/03-Reference/hooks)、[扩展机制](/03-Reference/extensions)、[记忆系统](/04-Advanced/memory-system)。
+
+## 从模板开始：rolebox init
+
+`rolebox init <name>` 按模板生成角色骨架，`--template` 选模板（默认 `standard`），`-y` 跳过交互提问：
+
+```bash
+cd rolebox && rolebox init code-reviewer --template standard -y
+```
+```text
+应看到：
+✓ Created standard role at <你的工作目录>/rolebox/code-reviewer
+Run `rolebox sync opencode` to deploy
+```
+（路径随你的工作目录变化。）
+
+| 模板 | 生成的文件 | 什么时候选它 |
+|---|---|---|
+| `minimal` | `role.yaml`、`PROMPT.md` | 只要一个能跑的最小角色 |
+| `standard`（默认） | 另加 `skills/`、`functions/`、`references/` 三份 README 占位 | 需要角色级技能与函数目录（最常见） |
+| `subagents` | 另加 `subagents/README.md`，并按你输入的名字逐个生成 `subagents/{name}/role.yaml` 与 `PROMPT.md` | 父角色 + 多个子代理 |
+
+三个模板生成的 `role.yaml` 只有少量键不同（`standard` 与 `subagents` 会写入 `skills: []`、`functions: [plan, execute]`，`subagents` 再写入 `subagents:` 列表），逐键含义见 [role.yaml 参考](/03-Reference/role-yaml)。
+
+## 配方 1：最小可运行的只读审查者
+
+场景：需要一个能读文件、能搜索、能评审，但改不了任何东西的审查角色。
+
+```yaml
+# ~/.config/opencode/rolebox/code-reviewer/role.yaml
 name: Code Reviewer
-description: Reviews code — read-only by design
-prompt: |
-  You are a code reviewer. Read and analyze code.
-  Do NOT modify any files.
-permission:
-  allow: [Read, Grep, Glob, LSP]
-  deny: [Edit, Write, Bash]
-```
-
-### 模式 2：写能力代理（Write-capable Agent）
-
-适用于需要修改代码、创建文件的开发代理：
-
-```yaml
-name: Implementer
-description: Writes production code
-prompt: |
-  You are a senior engineer. Write clean, testable code.
-permission:
-  allow: [Read, Grep, Glob, Bash, Edit, Write]
-functions:
-  - plan
-  - execute
-```
-
-### 模式 3：编排代理（Orchestrator）
-
-适用于协调多子代理工作流的管理角色：
-
-```yaml
-name: Team Lead
-description: Coordinates specialist sub-agents
-prompt: |
-  You are a team lead. Delegate tasks to sub-agents.
-subagents:
-  - name: Researcher
-    description: Researches code patterns
-    prompt: Research the relevant code...
-    permission:
-      allow: [Read, Grep, Glob]
-  - name: Implementer
-    description: Writes production code
-    prompt: Implement the approved solution...
-    permission:
-      allow: [Read, Grep, Glob, Bash, Edit]
-collaboration:
-  topology: review-loop
-  agents: [researcher, implementer]
-  max_iterations: 5
-  termination:
-    any_of:
-      - { max_iterations: 5 }
-      - { result_matches: { agent: implementer, contains: "DONE" } }
-```
-
-## 常见配方
-
-以下配方覆盖从简单到复杂的常见角色创建场景。每个配方包含完整的 YAML 配置、预期行为以及排查指引。
-
-### 配方 1：10 行创建一个代码审查者
-
-**问题陈述：** 你想用最少的配置创建一个专注于代码审查的角色。不需要子代理，不需要协作图，只需一个能回答问题、阅读文件和检查代码的代理。
-
-**YAML 配置**（保存到 `~/.config/opencode/rolebox/code-reviewer/role.yaml`，来源：`examples/code-reviewer/role.yaml`）：
-
-```yaml
-name: Code Reviewer
-description: Expert code reviewer
+description: Reviews code for correctness, performance, and readability
 model: gpt-4
 mode: subagent
 temperature: 0.2
 prompt: |
-  You are an expert code reviewer. Review code for correctness,
-  performance, and readability. Be specific and actionable.
+  You are an expert code reviewer. Review for correctness, performance,
+  and readability. Be specific and actionable. Never modify files.
 skills:
   - review-checklist
 permission:
   allow: [Read, Grep, Glob]
+  deny: [Edit, Write, Bash]
 ```
 
-**预期行为：**
-1. 重启 opencode 后，"Code Reviewer" 出现在代理列表中
-2. 激活后，代理仅拥有读取权限（Read、Grep、Glob），无法修改代码
-3. 你可以提出审查请求，如"|execute| 审查 src/auth.ts 的认证逻辑"
+预期行为：重启 harness 后这个角色以 `code-reviewer` 出现在可委托的代理里；它只能读；贴一段代码给它，它会按 `review-checklist` 技能逐条评审。
 
-**出错时检查什么：**
-- `~/.config/opencode/rolebox/code-reviewer/role.yaml` 路径是否正确
-- YAML 缩进是否正确（使用两个空格缩进）
-- `mode: subagent` 确保该角色以子代理模式运行
-- 如果代理列表中没有出现，运行 `rolebox list` 确认角色已注册
+```bash
+rolebox sync opencode
+```
+```text
+应看到：
+Synced 1 roles to opencode
+```
+（手工编写的角色重启 harness 即生效；这条命令用于把已安装的角色重新链接进 harness 的角色目录。）
 
-### 配方 2：创建带 3 个专家的团队负责人
+出错时检查：
 
-**问题陈述：** 你需要一个团队主管角色来协调多个专家子代理——调研员（Researcher）、实现者（Implementer）和审查员（Reviewer）——组成一个完整的代码审查流水线。
+- `skills:` 里的名字要对上文件：`skills/<name>.md` 或 `skills/<name>/SKILL.md`。
+- `mode: subagent` 表示它不会作为主代理出现在列表里；想让它出现在主列表就删掉这一行。
+- 角色没出现时，先确认文件在 `<角色根>/code-reviewer/role.yaml`（角色 ID = 目录名），再重启 harness。
 
-**YAML 配置**（保存到 `~/.config/opencode/rolebox/review-team-lead/role.yaml`，基于 `examples/review-team-approval/role.yaml` 和 `examples/team-lead/role.yaml`）：
+## 配方 2：带三个专家的团队负责人
+
+场景：一个父角色带着调研、实现、评审三个子代理完成一段工作。
 
 ```yaml
+# ~/.config/opencode/rolebox/review-team/role.yaml
 name: Review Team Lead
-description: Coordinates 3 specialist sub-agents for code review
+description: Coordinates a research, implement, and review workflow
 model: gpt-4
 prompt: |
-  You are a team lead. Dispatch work to the appropriate specialist
-  using the collaboration graph.
+  You are a team lead. Break the task down and delegate to your sub-agents.
 subagents:
   - name: Researcher
     description: Researches code patterns and context
     prompt: |
-      You are a research specialist. Find relevant code patterns,
-      API usage, and design decisions. Provide context.
+      You are a research specialist. Find relevant code, API usage, and
+      design decisions, and report them with file references.
     permission:
       allow: [Read, Grep, Glob]
   - name: Implementer
@@ -441,71 +248,81 @@ subagents:
     description: Reviews code for quality
     prompt: |
       You review code for correctness, style, and edge cases.
-      When satisfied, include "APPROVED" in your response.
-    permission:
-      allow: [Read, Grep, Glob]
-collaboration:
-  topology: review-loop
-  agents: [researcher, implementer, reviewer]
-  max_iterations: 5
-  termination:
-    any_of:
-      - { max_iterations: 5 }
-      - result_matches:
-          agent: reviewer
-          contains: "APPROVED"
+      Reply with APPROVED when the change is ready.
 ```
 
-**预期行为：**
-1. 团队主管接收任务后，通过 `dispatch` 将调研工作委派给 Researcher
-2. Researcher 返回调研结果后，主管将实现任务委派给 Implementer
-3. Implementer 完成代码修改后，主管将审查任务委派给 Reviewer
-4. Reviewer 返回 `"APPROVED"` 时流程自动终止（来源：`examples/review-team-approval/role.yaml:23-24`）
-5. 若 5 轮迭代后仍未批准，也自动终止（来源：`examples/review-team-approval/role.yaml:22`）
+预期行为：父角色把调研派给 `review-team--researcher`、实现派给 `review-team--implementer`、评审派给 `review-team--reviewer`，然后汇总三段结果。子代理的 `prompt` 不会从父角色继承，必须逐个写明。
 
-**出错时检查什么：**
-- 子代理的 `permission` 是否正确——Implementer 需要 `Edit` 和 `Write`，而 Researcher 和 Reviewer 不需要
-- 每个子代理的 `prompt` 是否非空（空 prompt 会导致子代理返回空结果）
-- `collaboration.agents` 中的名称是否与 `subagents` 下的 `name` 完全匹配（`review-team-approval/role.yaml:18`）
-- 子代理不会自动继承父角色的 `model`，每个子代理需显式声明（`create-a-role.md:232-235`）
+把这三步串成带返工和审批门的自动流水线，用运行时的图工具，见[图工作流](/02-Guide/graph-workflows)与[工作流模式](/04-Advanced/workflow-patterns)。
 
-### 配方 3：创建只读文档代理
+```bash
+rolebox sync opencode
+```
+```text
+应看到：
+Synced 1 roles to opencode
+```
 
-**问题陈述：** 你需要一个仅限读取的文档代理，可以阅读项目文件、搜索代码库、撰写技术文档——但绝不能修改任何文件。
+出错时检查：
 
-**YAML 配置**（保存到 `~/.config/opencode/rolebox/tech-writer/role.yaml`，基于 `examples/tech-writer/role.yaml` 和文档的"只读代理"模式 `create-a-role.md:316-329`）：
+- 子代理的 `name` 不能包含 `--`，它是层级 ID 的分隔符。
+- 子代理 ID 由 `父角色 ID--name 的小写连字符形式` 组成；命名规则与继承规则见[子代理](/02-Guide/subagents)。
+- 子代理的 `prompt` 为空时该条目会被跳过，日志里会写明。
+
+## 配方 3：只读文档代理
+
+场景：一个能读代码、能查全局技能，但不能改文件的写作角色。
 
 ```yaml
+# ~/.config/opencode/rolebox/tech-writer/role.yaml
 name: Tech Writer
-description: Technical documentation specialist — read-only
+description: Technical documentation specialist, read-only
 prompt: |
-  You are a technical writer specializing in clear, concise documentation.
-  Write documentation that is accurate, well-structured, and easy to
-  understand. Read the codebase to understand the feature, then write
-  docs. You may NOT edit any files.
+  You are a technical writer. Read the codebase to understand a feature,
+  then write documentation. You may NOT edit any files.
 opencode_skills:
   - humanizer
+functions:
+  - plan
 permission:
   allow: [Read, Grep, Glob, LSP]
   deny: [Edit, Write, Bash]
 ```
 
-**预期行为：**
-1. 代理可以阅读任意文件、搜索代码模式、使用 LSP（语言服务器协议，Language Server Protocol）分析代码
-2. 代理**不能**编辑文件、创建文件或运行命令
-3. `humanizer` 技能使其输出更接近人类写作风格（来源：`examples/tech-writer/role.yaml:6-7`）
-4. 适合与 `|plan|` 搭配使用："|plan| 阅读 API（应用程序接口，Application Programming Interface）模块并为新端点编写文档"
+预期行为：可以用 `|plan| 阅读 X 模块并为新端点写文档` 先出提纲再逐节写正文；`humanizer` 来自 harness 的全局技能目录。
 
-**出错时检查什么：**
-- `permission.deny` 中包含 `Edit`、`Write` 和 `Bash`，确保代理不会意外修改文件
-- 如果代理需要运行测试或查看构建输出，移除 `deny` 中的 `Bash`
-- `opencode_skills` 引用的是全局技能（`humanizer`），角色级 skill 用 `skills` 字段
-- 如果不需要自然语言润色，可以删除 `opencode_skills` 行
+```bash
+rolebox sync opencode
+```
+```text
+应看到：
+Synced 1 roles to opencode
+```
+
+出错时检查：
+
+- `opencode_skills` 引用的是全局技能目录（opencode 为 `~/.config/opencode/skills/`），角色私有技能用 `skills`。
+- 需要跑构建或测试时，把 `Bash` 从 `deny` 里去掉。
+
+## 常见错误
+
+| 现象 | 原因与修法 |
+|---|---|
+| 角色完全没出现 | `role.yaml` 不在 `<角色根>/<roleId>/` 下，或 YAML 解析失败；角色 ID 取目录名，且不能含 `--` |
+| 角色出现但提示词是空的 | `prompt` 与 `prompt_file` 都没给，或 `prompt_file` 指向的文件不存在——两种情况该角色都会被跳过 |
+| 技能或函数声明了却不生效 | 名字对不上文件：技能找 `skills/<name>.md` 或 `skills/<name>/SKILL.md`，函数找 `functions/<name>.md` |
+| 加了函数却少了一个内置函数 | `functions:` 是合并，不会移除内置函数；要移除得用 `disable_functions` |
+| 子代理没出现 | 内联声明缩进写错（`subagents` 必须是列表），或 `subagents/<name>/role.yaml` 的目录名与声明不一致 |
+| 子代理返回空结果 | 子代理的 `prompt` 为空，或它的权限不足以完成交给它的任务 |
+| 改了 YAML 却不生效 | 角色在启动时加载，要重启 harness；安装来的角色还要跑一次 `rolebox sync <harness>` |
 
 ## 下一步
 
-- [函数系统](/02-Guide/functions) — 内置函数与函数系统详解
-- [编写函数](/02-Guide/writing-functions) — 自定义函数定义
-- [编写技能](/02-Guide/authoring-skills) — 技能模块开发
-- [自定义 Hook](/02-Guide/custom-hooks) — Hook 扩展开发
-- [角色 YAML 参考](/03-Reference/role-yaml) — 完整 schema 参考
+- [子代理](/02-Guide/subagents) — 内联与文件式声明、ID 命名、配置继承
+- [role.yaml 参考](/03-Reference/role-yaml) — 全部顶层键、类型与默认值
+- [图工作流](/02-Guide/graph-workflows) — 用 `graph_*` 工具编排多个代理
+- [编写技能](/02-Guide/authoring-skills)、[编写函数](/02-Guide/writing-functions)、[引用文档](/02-Guide/references)
+
+## 备注
+
+> 自 v1.8.0 起，`role.yaml` 里的声明式协作配置（拓扑 / 数据流 / 参与者 / 循环上限）已被移除，多代理编排只保留命令式 `graph_*` 一条路径；升级写法见[迁移对照](/06-Appendix/migration)。

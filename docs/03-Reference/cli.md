@@ -1,379 +1,399 @@
 ---
 title: CLI 参考
-description: rolebox CLI 参考 — init/install/uninstall/sync/list/search/update/registry/status/info/config/monitor/memory/checkpoint/migrate 命令详解
+description: rolebox 命令行参考 — 14 个子命令的摘要、用法、常用参数与预期输出，以及退出码与状态文件
 ---
 
-# CLI 参考
+# CLI 参考（Command-Line Interface）
 
-> **相关文档：** [调度配置](/03-Reference/dispatch-config) — dispatch 块配置 | [注册中心](/03-Reference/registry) — 角色注册表管理 | [工具目录](/03-Reference/tool-catalog) — 内置工具列表
+rolebox 的命令行界面（Command-Line Interface，CLI）负责角色的安装、部署与诊断。本页逐个记录 14 个子命令的用法、常用参数与预期输出，末尾给出退出码与状态文件位置。
 
-rolebox 提供了一套**命令行界面（Command-Line Interface，CLI）**工具，用于从远程注册中心安装和管理 AI Agent 角色。简单来说，这些角色是预置好的"专业助手"配置包；通过 `rolebox` 命令，你可以在终端里完成搜索、安装、同步和诊断，而不必手写任何配置文件。
+> 相关：[注册中心](/03-Reference/registry) — 角色从哪个仓库来｜[平台与 Harness](/01-Overview/platform-harnesses) — sync 三个目标的目录规则｜[教程 01 安装并跑通第一个角色](/02-Guide/tutorial/01-install) — 从零走一遍安装、初始化与同步
 
-## 基本用法
-
-```bash
-npx rolebox <command> [options]
-```
-
-如果已全局安装：
+## 调用方式
 
 ```bash
-rolebox <command> [options]
+npm install -g rolebox     # 全局安装
+rolebox list               # 确认当前状态
 ```
 
-::: tip 全局安装建议
-推荐使用 `npm install -g rolebox` 全局安装。全局安装后，`rolebox` 命令可直接在终端中使用，无需 `npx` 前缀。这对于频繁使用 `rolebox init`、`rolebox sync` 等命令的开发工作流尤为便利。同步到 opencode 前，CLI 独立于 opencode 运行。
-:::
+```text
+应看到（rolebox list；尚未安装任何角色时）：
+No roles installed. Run `rolebox install <role>` to get started.
+```
+
+未全局安装时改用 `npx rolebox <command>`；`<command>` 换成 14 个子命令中的任意一个，每个都支持 `--help`。
 
 ## 命令一览
 
-CLI 共注册 15 个子命令（`src/cli/main.ts`）：`init`、`install`、`uninstall`、`sync`、`list`、`search`、`update`、`registry`、`status`、`info`、`config`、`monitor`、`memory`、`checkpoint`、`migrate`。
+CLI 共注册 14 个子命令，下面逐个给出摘要、用法、常用参数与预期输出：`init`、`install`、`uninstall`、`sync`、`list`、`search`、`update`、`registry`、`status`、`info`、`config`、`monitor`、`memory`、`checkpoint`。
+
+## 子命令
 
 ### `init [name]`
 
-交互式脚手架，创建一个可直接使用的角色目录结构。
+生成角色目录的脚手架；模板决定生成哪些文件。
 
 ```bash
+rolebox init my-role -y               # 默认模板 standard，跳过交互
+rolebox init my-role -t subagents     # 指定模板
 rolebox init                          # 交互式向导
-rolebox init my-role                  # 在 ./my-role 目录创建角色
-rolebox init my-role -y               # 跳过交互，使用默认值
-rolebox init my-role -t subagents     # 使用指定模板
 ```
 
-**可选模板：**
-
-| 模板 | 说明 |
+| 参数 | 说明 |
 |---|---|
-| `minimal` | 仅包含 `role.yaml` 和 `PROMPT.md` |
-| `standard` | 包含 skills、functions、references 目录的完整角色 |
-| `subagents` | 带子代理脚手架的父角色 |
-| `collaboration` | 带协作图拓扑（协作图的预设结构模式：pipeline/review-loop/star）的多代理角色 |
+| `[name]` | 角色目录名；省略时在当前目录生成 |
+| `-y`, `--yes` | 跳过交互，使用默认值 |
+| `-t`, `--template` | `minimal` / `standard` / `subagents`，默认 `standard` |
 
-### `install <role>[@version]`
-
-从注册中心安装一个角色。角色标识符支持多种格式：
-
-- `rolebox install software-architect` — 从默认注册中心安装最新版本
-- `rolebox install software-architect@1.0.0` — 安装指定版本
-- `rolebox install my-registry:custom-role` — 从指定注册中心安装
-- `rolebox install my-registry:role@2.0.0` — 从指定注册中心安装指定版本
-
-```bash
-rolebox install software-architect                # 安装最新版本
-rolebox install software-architect --quiet        # 静默模式，仅输出错误
-rolebox install software-architect --verbose      # 输出每个阶段的详细过程
-rolebox install software-architect --no-progress  # 禁用进度条
+```text
+应看到：
+✓ Created standard role at /Users/you/lab/my-role
+Run `rolebox sync opencode` to deploy
 ```
 
-**选项：**
+备注：`standard` 生成 `role.yaml`、`PROMPT.md`、`skills/README.md` 与 `functions/README.md`；`subagents` 另外生成 `subagents/` 与 `references/README.md`。目标目录已有 `role.yaml` 时报错并以退出码 1 结束。
 
-| 选项 | 说明 |
+### `install [role]`
+
+从注册中心安装一个角色；标识符支持 `role`、`role@version`、`registry:role`、`registry:role@version` 四种写法。省略角色名时进入交互式选择。
+
+```bash
+rolebox install software-architecture                  # 最新版本
+rolebox install software-architecture@2.2.0            # 指定版本
+rolebox install my-registry:my-role                    # 指定注册中心
+```
+
+| 参数 | 说明 |
 |---|---|
-| `--quiet` / `-q` | 抑制非错误输出 |
-| `--verbose` / `-v` | 输出每个阶段的详细过程 |
-| `--no-progress` | 禁用进度条（强制降级为普通行式输出） |
+| `[role]` | 角色标识符；省略时交互选择 |
+| `-q`, `--quiet` | 抑制非错误输出 |
+| `-v`, `--verbose` | 打印每个阶段的细节 |
+| `--no-progress` | 禁用进度条，降级为行式日志 |
 
-安装过程采用**加固的原子安装**流程：先将角色下载到临时目录，校验完整性摘要（若注册中心清单声明了 `integrity` 则必须匹配，否则拒绝安装），再原子地替换到目标位置；任一环节失败都会回滚，保留此前已安装的版本和锁文件。进度阶段依次为 `resolving` → `downloading` → `verifying` → `extracting` → `installing` → `done`（交互式 TTY 上显示确定性的字节进度条；非 TTY、`CI`、`TERM=dumb` 或传入 `--no-progress` 时降级为节流行式日志）。
-
-安装后，运行 `rolebox sync opencode` 部署角色。
-
-### `uninstall <role>`
-
-卸载已安装的角色并清理相关的符号链接。
-
-```bash
-rolebox uninstall software-architect
+```text
+应看到：
+✓ Installed software-architecture@2.2.0 from oh-my-role
+Run `rolebox sync opencode` to deploy
 ```
 
-### `sync <target>`
+备注：安装是原子的——先下载到临时目录、校验完整性摘要（注册中心清单声明了 `integrity` 时必须匹配），再替换目标；任一环节失败都会回滚并保留原版本。已安装同一版本时输出 `Role "x@2.2.0" is already installed from oh-my-role` 并直接结束。进度按 resolving → downloading → verifying → extracting → installing → done 六个阶段推进，非 TTY、`CI`、`TERM=dumb` 或传入 `--no-progress` 时降级为行式日志。安装后还需 `rolebox sync` 才会部署到 harness。
 
-将已安装的角色部署到目标工具的配置目录。目前仅支持 `opencode`。
+### `uninstall [role]`
+
+卸载一个已安装的角色，并清理它在各目标目录里留下的符号链接。
 
 ```bash
-rolebox sync opencode
+rolebox uninstall software-architecture
 ```
 
-这会创建符号链接：`~/.config/opencode/rolebox/{roleId}` → `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`
+```text
+应看到：
+✓ Uninstalled software-architecture@2.2.0
+```
 
-如果目标路径已存在手动创建的角色（普通目录），则会保留并输出警告。
+备注：无额外选项；省略角色名时进入交互式选择。角色不在 lock 文件中时报错并以退出码 1 结束。
+
+### `sync [target]`
+
+把已安装角色部署到目标 harness。角色本体只有一份共享源，`sync` 在目标目录建立指向它的符号链接。
+
+```bash
+rolebox sync              # 默认目标 opencode
+rolebox sync dsh
+rolebox sync opencode --relink
+```
+
+| 参数 | 说明 |
+|---|---|
+| `[target]` | `opencode` / `pi` / `dsh`，默认 `opencode` |
+| `--relink` | 把目标路径上的普通目录备份后替换为符号链接 |
+
+目标与链接位置：
+
+| 目标 | 链接位置 |
+|---|---|
+| `opencode` | `~/.config/opencode/rolebox/{roleId}` |
+| `pi` | `$PI_CODING_AGENT_DIR/rolebox/{roleId}`（未设置时为 `~/.pi/agent/rolebox/{roleId}`） |
+| `dsh` | `$DSH_HOME/rolebox/{roleId}`（未设置时为 `~/.dsh/rolebox/{roleId}`） |
+
+```text
+应看到：
+Synced 1 roles to opencode
+```
+
+共享源位于 `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`。目标路径上若是手动创建的普通目录，默认只警告并跳过；`--relink` 会先把它复制成同目录下的 `<role>.backup-<时间戳>`，再替换为符号链接，因此复制失败时原目录保持原样。
 
 ### `list`
 
-列出所有已安装的角色，显示版本和来源注册中心。
+列出 lock 文件中的已安装角色及其版本与来源注册中心。
 
 ```bash
 rolebox list
-rolebox list --json   # JSON 格式输出，便于脚本处理
+rolebox list --json     # 结构化输出，便于脚本处理
+```
+
+参数：`--json` 以 JSON 输出角色数组。
+
+```text
+应看到：
+Installed roles:
+  software-architecture  2.2.0  (oh-my-role)
 ```
 
 ### `search [query]`
 
-在所有已配置的注册中心中搜索可用角色。
+在所有已配置的注册中心里搜索角色，匹配范围是角色名、描述与标签（不区分大小写）。省略关键词时列出注册中心中的全部角色。
 
 ```bash
-rolebox search               # 列出所有可用角色
-rolebox search react         # 搜索匹配 "react" 的角色
-rolebox search --no-cache    # 绕过注册中心缓存
+rolebox search architect
 ```
 
-匹配范围包括角色名称、描述和标签（不区分大小写）。
+| 参数 | 说明 |
+|---|---|
+| `[query]` | 关键词；省略时不过滤 |
+| `--no-cache` | 绕过注册中心清单缓存 |
+
+```text
+应看到：
+Results from oh-my-role:
+  software-architecture    2.2.0  Software architecture orchestrator — coordinates specialist subagents ...
+```
+
+备注：注册中心清单默认缓存 5 分钟。无匹配时输出 `No roles matching 'architect'. Try a different search term.`；所有注册中心都取不到清单时输出 `No roles found in any registry.`。
 
 ### `update [role]`
 
-将已安装的角色更新到注册中心的最新版本。
+把已安装角色更新到注册中心里的最新版本；省略角色名时更新全部。
 
 ```bash
-rolebox update                         # 更新所有已安装的角色
-rolebox update software-architect      # 更新指定角色
-rolebox update --no-cache              # 绕过注册中心缓存
-rolebox update --quiet                 # 静默模式，仅输出错误
-rolebox update --verbose               # 输出每个阶段的详细过程
-rolebox update --no-progress           # 禁用进度条
+rolebox update                  # 更新全部已安装角色
+rolebox update teacher          # 只更新一个角色
+rolebox update --no-cache       # 绕过注册中心缓存
 ```
 
-**选项：**
-
-| 选项 | 说明 |
+| 参数 | 说明 |
 |---|---|
-| `--no-cache` | 绕过注册中心缓存 |
-| `--quiet` / `-q` | 抑制非错误输出 |
-| `--verbose` / `-v` | 输出每个阶段的详细过程 |
-| `--no-progress` | 禁用进度条（强制降级为普通行式输出） |
+| `[role]` | 只更新指定角色；省略时更新全部 |
+| `--no-cache` | 绕过注册中心清单缓存 |
+| `-q`, `--quiet` | 抑制非错误输出 |
+| `--no-progress` | 禁用进度条（`-v` / `--verbose` 同 `install`） |
 
-与 `install` 相同，`update` 采用原子替换与回滚语义：新版本先下载到临时目录、校验完整性，再原子替换；任一环节失败时保留此前已安装的版本和锁文件。
+```text
+应看到：
+✓ Updated teacher from 0.9.0 to 1.0.0
+Updated 1 roles.
+Run `rolebox sync opencode` to deploy changes
+```
 
-### `registry <subcommand>`
+备注：更新与安装使用同一套原子替换与完整性校验；失败时保留此前已安装的版本，并逐个角色给出警告。全部已是最新时只打印一行汇总，不提示同步。
 
-管理注册中心源。
+### `registry`
+
+管理注册中心源。子命令为 `list`、`add`、`remove`；不带子命令时等同 `list`。
 
 ```bash
-rolebox registry list                              # 显示所有已配置的注册中心
-rolebox registry add https://github.com/user/my-roles  # 添加注册中心
-rolebox registry remove my-roles                   # 移除注册中心（不能移除默认注册中心）
+rolebox registry add https://github.com/my-org/my-registry
+rolebox registry remove my-registry
 ```
+
+| 子命令 | 说明 |
+|---|---|
+| `list` | 列出全部注册中心，默认项带 `(default)` 标记 |
+| `add <url>` | 添加一个 GitHub 仓库为注册中心；注册中心名取仓库名，添加前先拉取清单校验 |
+| `remove <name>` | 移除注册中心；默认注册中心不可移除 |
+
+```text
+应看到（rolebox registry list）：
+Registries:
+  oh-my-role    https://github.com/EricMoin/oh-my-role (default)
+```
+
+备注：`add` 只接受 `https://github.com/owner/repo` 或 `git@github.com:owner/repo.git` 两种 URL 写法，其余报 `Invalid GitHub URL`。移除后若仍有角色来自该注册中心，会提示先卸载它们。清单格式与发布流程见[注册中心](/03-Reference/registry)。
 
 ### `status`
 
-显示 rolebox 安装的整体健康状态：版本、注册中心、已安装角色的同步状态、opencode 插件注册以及技能符号链接完整性。
+打印一份整体状态报告：版本、配置文件位置、注册中心、每个已安装角色在各目标上的部署状态，以及各 harness 的集成情况。
 
 ```bash
 rolebox status
-rolebox status --check-updates   # 同时检查注册中心中的更新版本
-rolebox status --json            # JSON 格式输出，便于脚本处理
+rolebox status --check-updates    # 同时查询注册中心里的新版本
+rolebox status --json             # 结构化输出
 ```
 
-### `info <role>`
+参数：`-u` / `--check-updates` 查询并标注可用的新版本；`--json` 以 JSON 输出同样的字段。
 
-显示已安装角色的详细信息，包括模型配置、技能、函数、子代理、协作图和同步状态。
+```text
+应看到（节选）：
+Rolebox v1.9.0
+
+Installed Roles
+  ✓ software-architecture  2.2.0    (oh-my-role)  → synced
+
+OpenCode Integration
+  Sync target:   ~/.config/opencode/rolebox
+  Synced:        1/1 roles
+```
+
+备注：报告末尾用提示行给出下一步命令，例如未同步时提示 `rolebox sync opencode`、opencode 未注册插件时提示把它加进配置。
+
+### `info [role]`
+
+显示一个已安装角色的详情：元数据与安装路径、模型配置、技能与函数、子代理，以及各目标的部署状态。
 
 ```bash
-rolebox info software-architect
-rolebox info software-architect --json    # JSON 格式输出
-rolebox info software-architect --check   # 验证完整性哈希
+rolebox info teacher
+rolebox info teacher --check    # 校验完整性哈希
+rolebox info teacher --json     # 结构化输出
 ```
 
-### `config <role> [options]`
-
-交互式配置角色的模型分配。支持为根角色和子代理分别或批量指定模型。项目级配置自 v0.23.0 起支持（历史引入标记；当前版本为 `1.0.0`）。
-
-```bash
-rolebox config my-role                          # 交互式向导 — 为角色及其子代理选择或输入模型
-rolebox config my-role --model provider/gpt-4   # 非交互模式 — 批量设定模型
-rolebox config my-role -m provider/gpt-4 -p     # 短别名形式（等价于 --model / --primary-only）
-rolebox config my-role --model provider/gpt-4 --primary-only  # 仅更新根角色的 role.yaml
-```
-
-**选项：**
-
-| 选项 | 说明 |
+| 参数 | 说明 |
 |---|---|
-| `--model` / `-m` | 非交互模式下指定模型标识符（`src/cli/commands/config.ts:342-346`） |
-| `--primary-only` / `-p` | 仅更新根角色的 role.yaml（`src/cli/commands/config.ts:347-351`） |
+| `[role]` | 角色名；省略时交互选择 |
+| `--check` | 校验安装目录的完整性哈希 |
+| `--json` | 以 JSON 输出；必须显式给出角色名 |
 
-交互模式下会依次：扫描可用模型、为根角色选择模型、为子代理选择"统一应用"或"逐个配置"模式，最终汇总写回 `role.yaml`。
+```text
+应看到（节选）：
+teacher
 
-非交互模式下使用 `--model`（或 `-m`）指定模型标识符，使用 `--primary-only`（或 `-p`）限制仅更新根角色。
+Details
+  Version:      1.0.0
+  Registry:     oh-my-role
+  Path:         ~/.local/share/rolebox/roles/oh-my-role/teacher@1.0.0
+
+Sync
+  ✓ OpenCode  Symlinked to ~/.config/opencode/rolebox/teacher
+```
+
+备注：`--check` 失败时打印 expected / actual 两个摘要并以退出码 1 结束；`--json` 若省略角色名会直接报错，以保证管道里的输出是纯 JSON。
+
+### `config [role]`
+
+为一个已同步的角色（及其子代理）选择模型，并把结果写回对应的 `role.yaml`。
+
+```bash
+rolebox config teacher                                    # 交互式向导
+rolebox config teacher -m provider/model                  # 非交互：批量设定模型
+rolebox config teacher -t dsh -m provider/model           # 指定目标
+```
+
+| 参数 | 说明 |
+|---|---|
+| `[role]` | 角色名；该角色必须已同步到目标 |
+| `-m`, `--model` | 非交互模式下的模型 ID |
+| `-p`, `--primary-only` | 只更新根角色的 `role.yaml` |
+| `-t`, `--target` | `opencode` / `pi` / `dsh`，默认 `opencode` |
+
+```text
+应看到（第二段的路径随运行目录而变）：
+Updated 1 role.yaml file(s) to model "provider/model":
+  teacher (<运行目录到 role.yaml 的相对路径>): (none) → provider/model
+```
+
+备注：交互模式需要 TTY，非 TTY 下必须传 `--model`。角色没有同步到目标时以退出码 1 结束，并指出它同步到了哪个目标。
 
 ### `monitor`
 
-显示当前项目的运行时调度活动、激活的函数和代理工作流。数据来源为项目本地 `.rolebox/state/` 目录中的持久化状态文件。支持终端用户界面（Terminal User Interface，TUI）仪表盘（基于 Solid.js + OpenTU），提供实时更新的状态面板、任务表格、Graphs 面板和函数状态追踪。
+读取项目本地 `.rolebox/state/` 中的运行时状态，显示活跃任务、激活的函数、循环与图工作流。
 
 ```bash
-rolebox monitor                              # TUI 仪表盘，显示活跃任务和函数快照
-rolebox monitor --all                        # 包括已完成/已取消的任务
-rolebox monitor --json                       # JSON 格式输出
-rolebox monitor --no-status                  # 隐藏状态概览面板
-rolebox monitor --watch                      # 实时刷新仪表盘（默认 1 秒间隔）
-rolebox monitor --watch --interval 5000      # 自定义刷新间隔
-rolebox monitor --watch --json               # NDJSON 输出（每个间隔一行 JSON）
+rolebox monitor                      # 一次性快照
+rolebox monitor --watch              # 实时刷新（默认 1000 毫秒）
+rolebox monitor --all --json         # 含已完成 / 已取消任务的 JSON
+rolebox monitor --export json --output snapshot.json
 ```
 
-TUI 仪表盘显示内容：活跃的循环任务、引擎图工作流（Graphs 面板）、调度摘要（队列深度、并发槽位）和并发池健康状态。使用 `--no-status` 可以隐藏概览面板。
+| 参数 | 说明 |
+|---|---|
+| `-a`, `--all` | 包含已完成 / 已取消的任务 |
+| `--json` | JSON 输出；配合 `--watch` 时是 NDJSON |
+| `-w`, `--watch` | 实时刷新仪表盘 |
+| `-i`, `--interval <ms>` | 刷新间隔，默认 1000，最小 500 |
+| `--task-id <id>` | 只看某个任务的完整详情 |
+| `--export <fmt>`, `--output <file>` | 导出 `json` / `prometheus` / `summary`，可写入文件 |
 
-`monitor` 还提供 **Graphs 面板**，直接读取 v2 图执行引擎的持久化状态（`engine-*.json`）与写入侧事件日志（`graph-events-{hash}.ndjson`），展示每个引擎图的执行阶段（phase）、各状态的节点数、累计预算（会话数 / token / 成本）、前沿节点（frontier）、循环组（图中被标记为可重复执行的一组节点，带最大轮数上限）以及最近的节点信号事件。引擎图是独立于调度任务的执行原语，其 `graphId` 不会与某个调度任务的 `sessionId` 相等，因此不会按活跃会话过滤——只要持久化状态存在即会被展示。TUI 侧栏同步展示引擎图活动：每个节点的状态符号、来自图事件的实时信号以及累计预算。
+```text
+应看到（--json 的节选结构，无活跃调度时）：
+{
+  "projectDir": "/path/to/project",
+  "tasks": [],
+  "activeFunctions": [],
+  "graphSessions": [],
+  "dispatchSummary": { "pending": 0, "running": 0, "completed": 0, "error": 0, "cancelled": 0 }
+}
+```
 
-### `memory <subcommand>`
+备注：TUI 的 Graphs 面板直接读取图引擎的持久化状态与事件日志，展示每个图的阶段、节点计数、累计预算与前沿节点。完整参数见 `rolebox monitor --help`。
 
-管理 rolebox 持久化记忆存储。记忆数据存储在项目本地的 SQLite 数据库中（`MemoryStore`），支持跨会话保持上下文。
+### `memory`
+
+管理项目本地的持久记忆库（SQLite），让代理跨会话保留上下文。子命令为 `list`、`show`、`search`、`delete`、`export`、`clean`、`stats`。
 
 ```bash
-rolebox memory list                          # 列出记忆条目（默认最近 20 条）
-rolebox memory list --scope workspace        # 仅显示工作空间范围的记忆
-rolebox memory list --category decision      # 按类别过滤
-rolebox memory list --sort relevance         # 按相关性排序
-rolebox memory show <id>                     # 查看单条记忆的完整内容
-rolebox memory search <query>                # 全文搜索记忆
-rolebox memory search <query> --scope role   # 仅搜索角色私有记忆
-rolebox memory delete <id>                   # 删除单条记忆（交互确认）
-rolebox memory delete <id> --yes             # 跳过确认直接删除
-rolebox memory export                        # 导出全部记忆为 Markdown（标准输出）
-rolebox memory export --format json          # 导出为 JSON 格式
-rolebox memory export --output memories.md   # 写入文件
-rolebox memory clean                         # 清理过期记忆（干运行，仅列出候选）
-rolebox memory clean --yes                   # 执行删除过期的未访问记忆
-rolebox memory clean --max-age-days 90       # 指定未访问期限（默认 180 天）
-rolebox memory clean --min-relevance high    # 仅清理低相关性的记忆
-rolebox memory stats                         # 显示记忆存储统计信息
+rolebox memory list                        # 最近 20 条
+rolebox memory search "构建命令"            # 全文搜索
+rolebox memory stats                       # 存储统计
+rolebox memory clean --max-age-days 90 --yes
 ```
-
-**子命令：**
 
 | 子命令 | 说明 |
 |---|---|
-| `list` | 列出记忆条目，支持 `--scope`（workspace/role/both）、`--category`、`--limit`（默认 20）、`--sort`（recent/relevance/accessed） |
-| `show` | 显示单条记忆的完整元数据和内容 |
-| `search` | 全文搜索，支持 `--scope` 和 `--limit`（默认 10） |
-| `delete` | 删除单条记忆，支持 `--yes` 跳过确认 |
-| `export` | 导出全部记忆为 Markdown 或 JSON（`--format`），支持 `--output` 写入文件 |
-| `clean` | 清理长时间未访问的过期记忆，支持 `--max-age-days`（默认 180）、`--min-relevance`（high/medium/low）、`--yes`（默认干运行） |
-| `stats` | 显示记忆存储统计信息 |
+| `list` | 列出记忆；`--scope`（workspace / role / both，默认 both）、`--category`、`--limit`（默认 20）、`--sort`（recent / relevance / accessed） |
+| `show <id>` | 显示单条记忆的完整内容 |
+| `search <query>` | 全文搜索；`--scope`、`--limit`（默认 10） |
+| `delete <id>` | 删除一条记忆；`--yes` 跳过确认 |
+| `export` | 导出为 Markdown 或 JSON（`--format`），`--output` 写入文件 |
+| `clean` | 清理长期未访问的记忆；`--max-age-days`（默认 180）、`--min-relevance`、`--yes`；不带 `--yes` 时是干运行 |
+| `stats` | 统计总数，并按 scope / category / relevance 分组 |
 
-::: tip 非交互式 stdin 确认
-`memory delete` 在 stdin 不是终端（非 TTY）时会**拒绝**进入交互确认，而要求改用 `--yes`：在 CI 或管道中运行 `rolebox memory delete <id>` 会报错（`Confirmation requires an interactive terminal. Re-run with --yes to skip the prompt.`）并以退出码 `1` 结束，而不会阻塞等待输入。请改用 `rolebox memory delete <id> --yes`。
-:::
-
-### `checkpoint <subcommand>`
-
-管理调度检查点（checkpoint）。检查点在任务执行过程中持久化阶段状态，失败重试时可自动注入上下文，避免重复工作。自 v0.23.0 起可用（历史引入标记；当前版本为 `1.0.0`）。
-
-```bash
-rolebox checkpoint list                       # 列出所有活跃检查点
-rolebox checkpoint list --task <taskId>       # 按任务 ID 过滤
-rolebox checkpoint clean                      # 清理已过期的检查点
-rolebox checkpoint clean --all                # 清理所有检查点（需要交互确认）
+```text
+应看到（尚未写入任何记忆时）：
+No memory entries found.
 ```
 
-**子命令：**
+备注：`list` 有数据时打印 ID / Title / Category / Relevance / Updated 五列。`delete` 在非 TTY 环境会拒绝交互确认并要求改用 `--yes`，不会阻塞等待输入。
+
+### `checkpoint`
+
+管理调度检查点：任务执行过程中持久化的阶段状态，失败重试时可自动注入，避免重复工作。子命令为 `list` 与 `clean`。
+
+```bash
+rolebox checkpoint list                 # 列出所有活跃检查点
+rolebox checkpoint clean                # 清理过期检查点
+rolebox checkpoint clean --all          # 清理全部（需确认）
+```
 
 | 子命令 | 说明 |
 |---|---|
-| `list` | 列出活跃检查点，支持 `--task` 过滤。显示列：任务 ID、检查点 ID、阶段、已完成/剩余项数、创建时间和 TTL |
-| `clean` | 清理过期检查点（默认使用 `DEFAULT_CHECKPOINT_TTL_MS`），`--all` 清理全部（需交互确认） |
+| `list` | 列出活跃检查点；`--task` 过滤。列为任务 ID、检查点 ID、阶段、已完成 / 剩余、创建时间与过期时间 |
+| `clean` | 清理过期检查点；`--all` 连未过期的也清理 |
 
-### `migrate <roleYamlPath> [options]`
-
-将旧版 `collaboration:` 声明迁移为等效的 v2 `graph:` 声明。
-
-该命令读取一个使用 `collaboration:` 块且不含 `graph:` 块的旧版 `role.yaml`，通过协作图转换器将其转换为等效的 v2 图声明（`GraphDeclaration`），序列化为规范的 `graph:` YAML，并把原始的 `collaboration:` 块保留为 YAML 注释（每行加上 `# legacy collaboration: ` 前缀）写回文件，使迁移过程可审计、可手工回滚。
-
-```bash
-rolebox migrate role.yaml                      # 就地迁移，保留 collaboration 块为注释
-rolebox migrate role.yaml --parent my-role     # 指定终止审批（父）节点的可分发 ID
+```text
+应看到（尚无检查点时）：
+No checkpoint directory found. No checkpoints exist.
 ```
 
-**选项：**
+备注：检查点数据同样位于项目的 `.rolebox/state/` 下，默认按 TTL 判定过期。
 
-| 选项 | 说明 |
+## 退出码
+
+CLI 沿用标准 Unix 退出码约定；在 CI 或脚本中检查 `$?`，非零即中止后续依赖步骤。
+
+| 退出码 | 含义 |
 |---|---|
-| `--parent` | 终止审批（父）节点的可分发 ID（默认取角色 `name`） |
+| `0` | 成功 |
+| `1` | 一般错误：参数错误、运行时异常、子命令失败 |
+| `130` | 用户按 Ctrl+C 中断（SIGINT） |
+| `143` | 进程收到终止信号（SIGTERM） |
 
-当角色已含 `graph:` 块，或不含 `collaboration:` 块时，命令为 no-op（输出 `No-op: <path> (<reason>)`）。迁移保持拓扑等价：节点数、边方向与循环上限（`max_traversals == max_iterations`，即循环最大轮数上限，防止死循环）精确保留。
+## 状态文件
 
-## 常用工作流组合
+| 路径 | 内容 |
+|---|---|
+| `~/.config/rolebox/config.yaml` | 注册中心列表（默认 oh-my-role） |
+| `~/.config/rolebox/rolebox.lock` | 已安装角色清单：版本、来源注册中心、安装时间与完整性摘要 |
+| `~/.local/share/rolebox/roles/` | 角色本体的共享源目录，`sync` 的符号链接都指向它 |
+| `.rolebox/state/`（项目本地） | `monitor` 与 `checkpoint` 读取的运行时状态 |
 
-以下三个工作流覆盖了 rolebox CLI 的典型使用场景，将单条命令串联为完整的操作流程。
+`ROLEBOX_CONFIG_DIR` 与 `ROLEBOX_DATA_DIR` 可分别覆盖前两处所在目录；`XDG_CONFIG_HOME` 与 `XDG_DATA_HOME` 也会被尊重。
 
-### 工作流 1：安装新角色
-
-从注册中心发现、安装并部署一个角色到 opencode：
-
-```bash
-# 1. 搜索可用角色
-rolebox search react
-
-# 2. 安装指定角色（支持 @version 锁定版本）
-rolebox install react-ui
-
-# 3. 同步到 opencode 配置目录
-rolebox sync opencode
-
-# 4. 验证角色配置和完整性
-rolebox info react-ui --check
-```
-
-此工作流适用于首次部署角色或从社区注册中心引入新代理。
-
-### 工作流 2：发布角色到注册中心
-
-从零创建角色、本地编辑后推送到注册中心：
-
-```bash
-# 1. 脚手架生成角色目录
-rolebox init my-role -t standard
-
-# 2. 编辑 role.yaml、skills、functions 等文件（手动操作）
-
-# 3. 将本地目录添加为注册中心源
-rolebox registry add https://github.com/user/my-roles
-
-# 4. 使用 git 打 tag 发布版本
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-::: tip
-发布工作流依赖 Git 标签作为版本标识。注册中心通过扫描仓库的语义化版本标签来索引可用角色。
-:::
-
-### 工作流 3：诊断问题
-
-当角色行为异常或系统状态不明确时，按以下顺序排查：
-
-```bash
-# 1. 检查全局安装状态和同步完整性
-rolebox status
-
-# 2. 深入检查目标角色的配置和完整性哈希
-rolebox info my-role --check
-
-# 3. 查看运行时调度活动和函数状态（TUI 仪表盘）
-rolebox monitor
-```
-
-使用 `rolebox status --json` 可将状态导出为结构化数据，便于脚本集成到告警或 CI 流水线。
-
-## CLI 退出码参考
-
-rolebox CLI 使用标准的 Unix 进程退出码约定。CLI 基于 `citty` 的 `runMain` 运行（`src/cli/main.ts:40`），未定义自定义退出码体系。
-
-| 退出码 | 含义 | 说明 |
-|--------|------|------|
-| `0` | 成功 | 命令正常完成 |
-| `1` | 一般错误 | 参数错误、运行时异常、子命令失败等（如 `info.ts:223`、`config.ts:289` 设置 `process.exitCode = 1`） |
-| `130` | SIGINT | 用户按下 Ctrl+C 中断进程（`src/core/composition.ts:92`） |
-| `143` | SIGTERM | 进程收到终止信号（`src/core/composition.ts:93`） |
-
-::: tip 退出码使用建议
-在 CI 或脚本中调用 rolebox CLI 时，建议检查 `$?`（退出码）。非零退出码表示命令未按预期完成，应中止后续依赖步骤。
-:::
-
-## 配置文件
-
-CLI 的状态存储在以下两个文件中：
-
-- `~/.config/rolebox/config.yaml` — 注册中心配置（默认注册中心：oh-my-role）
-- `~/.config/rolebox/rolebox.lock` — 已安装角色清单，包含版本和完整性追踪
-
-## 下一步
-
-- [调度配置](./dispatch-config) — 了解如何通过 role.yaml 和环境变量控制子代理调度行为
-- [注册中心](./registry) — 了解如何创建和管理角色注册中心

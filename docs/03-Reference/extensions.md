@@ -1,26 +1,22 @@
 ---
-title: 扩展机制
-description: 扩展（Extension）系统 — 9 种扩展作用域（条件/拓扑/终止条件/恢复策略/恢复模式/通知通道/通知事件/观察事件/并发策略）、模块合约与安全机制
+title: 扩展机制（Extensions）
+description: 扩展参考 — 7 种扩展作用域的 role.yaml 声明、模块合约、注册流程、接线现状、安全机制与平台支持。
 ---
 
-# 扩展机制
+# 扩展机制（Extensions）
 
-> **相关文档：** [Hook 机制](/03-Reference/hooks) — 自定义 Hook 系统 | [role.yaml 参考](/03-Reference/role-yaml) — extensions 配置字段 | [错误处理](/03-Reference/error-handling) — 恢复系统集成
+扩展（extension）把 rolebox 的封闭词汇表打开一个口子：不改动 rolebox 源码，就能加入自定义条件、图拓扑、恢复策略与模式、通知通道与事件、观察事件。本页是扩展的参考——每种作用域声明什么、模块必须导出什么、注册时发生什么。
 
-扩展机制允许你注册自定义模块，以开放 rolebox 的封闭词汇表 —— 添加自定义条件、图拓扑、终止条件、恢复策略、恢复模式、通知通道、通知事件、观察事件和并发策略。无需修改源代码（上述术语的含义见下方「术语速览」）。
+> 相关：[Hook 机制](/03-Reference/hooks)｜[role.yaml 参考](/03-Reference/role-yaml)｜[错误处理](/03-Reference/error-handling)｜[自定义 Hook（任务走查）](/02-Guide/custom-hooks)
 
-::: tip 术语速览
-- **扩展点（extension point）** — rolebox 预留给自定义模块接入的扩展位置；本页的 9 种扩展作用域就是 9 类扩展点。
-- **图拓扑 / 拓扑（topology）** — 协作图的预设结构模式：pipeline（串行）、review-loop（循环）、star（并行）。
-- **终止条件（termination）** — 决定协作图循环何时停止执行的条件。
-- **协作图（collaboration）** — 描述多个代理"谁把工作传给谁"的有向图。
-- **continue_until** — 一个终止/继续条件：让执行持续进行，直到某个条件满足才停下。
-- **Hook（挂钩）** — 在特定生命周期事件触发时注入自定义逻辑的机制，详见 [Hook 机制](./hooks)。
-:::
+> 自 v1.8.0 起，扩展作用域为 7 种；此前的一个作用域已随声明式协作子系统移除。
 
-在 `role.yaml` 中声明 `extensions:` 块：
+## 最小示例
+
+在 `role.yaml` 里声明扩展，再写它们的模块。下面把 7 种作用域各写一条：
 
 ```yaml
+# role.yaml
 extensions:
   conditions:
     - name: dispatch_all_complete
@@ -32,50 +28,22 @@ extensions:
     - name: my-recovery
       module: ext/my-recovery.js
       categories: [session_error]
+  recovery_patterns:
+    - name: my-pattern
+      module: ext/my-pattern.js
+      category: session_error
   notification_channels:
     - kind: slack
       module: ext/slack-channel.js
+  notification_events:
+    - name: custom_event_occurred
   observe_events:
     - name: dispatch_complete
       module: ext/dispatch-event.js
 ```
 
-## 支持的作用域
-
-共 9 种扩展作用域，每种对应一个封闭词汇表：
-
-| 作用域 | 开放内容 | 模块合约 |
-|---|---|---|
-| `conditions` | 函数门控 / 转换 / continue_until 条件 | `{ handler: (arg, env) => boolean }` |
-| `graph_topologies` | 协作图拓扑模板 | `{ expand: (agents) => FlowEdge[] }` |
-| `termination_conditions` | 图循环终止条件类型 | `{ parse: (value, agents) => LoopCondition \| null }` |
-| `recovery_strategies` | 错误恢复策略名称（通过 YAML 验证） | `{ name, execute }` |
-| `recovery_patterns` | 错误检测模式 | `{ name, category, match }` |
-| `notification_channels` | 通知通道类型 | `{ create: (config) => { kind, send, dispose } }` |
-| `notification_events` | 通知事件类型（开放字符串） | *（无需模块 —— 事件为开放字符串）* |
-| `observe_events` | 函数观察触发事件 | `{ handle: (ctx, spec) => string[] }` |
-| `concurrency_policies` | 自定义并发控制策略 | `{ create: (opts) => IConcurrencyManager }` |
-
-## 模块合约示例
-
-### Conditions（条件）
-
 ```javascript
-// ext/dispatch-complete.js
-export default {
-  handler: (arg, env) => {
-    // env.sessionID、env.state、env.artifacts 可用
-    return env.state.kv["dispatch_complete"] === true;
-  },
-};
-```
-
-### Notification Channels（通知通道）
-
-通道模块导出 `create` 工厂函数，返回包含 `kind`、`send`、`dispose` 的对象（合约定义见 `src/extensions/types.ts:103-110`）：
-
-```javascript
-// ext/slack-channel.js
+// ext/slack-channel.js —— notification_channels 的模块合约
 export default {
   create: (config) => ({
     kind: "slack",
@@ -86,15 +54,139 @@ export default {
       });
     },
     dispose: async () => {
-      // 清理 HTTP 连接等资源
+      // 释放 HTTP 连接等资源
     },
   }),
 };
 ```
 
-### Notification Events（通知事件）
+条目里的 `module` 建议写绝对路径：相对路径以 rolebox 运行时的工作目录为基准解析，而不是角色目录。
 
-通知事件是**开放字符串**，无需模块合约。在 `extensions.notification_events` 中声明的每个条目仅登记一个事件类型名称（`src/extensions/points/notification-events.ts:7-15`），`module` 字段不被该扩展点加载：
+## 7 种扩展作用域
+
+| 作用域 | 打开的内容 | 模块合约 | 条目字段 |
+|---|---|---|---|
+| `conditions` | 函数门控 / 转换条件名 | `{ handler(arg, env) => boolean }` | `name`、`module` |
+| `graph_topologies` | 图拓扑模板 | `{ expand(agents) => FlowEdge[] }` | `name`、`module` |
+| `recovery_strategies` | 错误恢复策略名 | `{ name, execute(ctx) => Promise }` | `name`、`module`、`categories?` |
+| `recovery_patterns` | 错误检测模式 | `{ name, category, match(error) }` | `name`、`module`、`category` |
+| `notification_channels` | 通知通道类型 | `{ create(config) => { kind, send, dispose } }` | `kind`、`module` |
+| `notification_events` | 通知事件类型名 | 无（只登记名称，不加载模块） | `name` |
+| `observe_events` | 函数观察事件处理器 | `{ handle(ctx, spec) => string[] }` | `name`、`module` |
+
+所有条目都接受可选的 `description`。模块用默认导出（`export default`）暴露合约对象。
+
+## 作用域详解
+
+### `conditions`（条件）
+
+注册一个命名条件，之后可以在函数 frontmatter 的 `gate`、`transition`、`continue_until` 里按名字引用。
+
+```javascript
+// ext/dispatch-complete.js
+export default {
+  capability: true, // 声明使用只读能力对象
+  handler: (arg, cap) => cap.getStateValue("dispatch_complete") === "true",
+};
+```
+
+模块导出 `handler(arg, env)`，`env` 是完整求值环境；如果模块额外导出 `capability: true`，第二个参数会换成**只读能力对象**，后者只暴露下面这些读取接口：
+
+| 能力成员 | 说明 |
+|---|---|
+| `sessionID` / `fnName` | 会话 ID 与函数名 |
+| `isUserMessagedThisTurn()` | 本轮用户是否发过消息 |
+| `getTodosRemaining()` | 会话计划中未勾选的 `- [ ]` 数量 |
+| `artifactExists(name)` | 命名制品是否存在且有内容 |
+| `isEvidenceMet(evidence[])` | 指定证据标签是否全部满足 |
+| `wasToolObserved(tool)` | 本会话是否观察到某个工具 |
+| `getTurnsSinceActivation()` | 函数激活后经过的轮数 |
+| `getStateValue(key)` | 只读读取运行时 KV 中的一个值 |
+
+同名条件会被后注册的覆盖，并记录一条 `Condition '<name>' already registered — overwriting` 警告。
+
+### `graph_topologies`（图拓扑）
+
+注册一个拓扑模板：`expand(agents)` 接收代理名列表，返回边列表，边形如 `{ from, to, label?, exit? }`。
+
+```javascript
+// ext/diamond-topology.js
+export default {
+  expand: (agents) => [
+    { from: "parent", to: agents[0] },
+    { from: agents[0], to: agents[1] },
+    { from: agents[0], to: agents[2] },
+    { from: agents[1], to: agents[3] },
+    { from: agents[2], to: agents[3] },
+  ],
+};
+```
+
+注册的拓扑名同时进入图模板的合法取值集合；自定义拓扑的 `expand` 优先于内置的 `pipeline` / `review-loop` / `star`。同名拓扑会被覆盖，并记录一条 `overwriting existing custom topology: "<name>"` 警告。
+
+### `recovery_strategies`（恢复策略）
+
+注册一个可被恢复链引用的策略。模块必须导出 `name` 与 `execute`；`execute` 收到包含 `sessionID`、`error`、`category` 等信息的上下文，返回任意结果对象。
+
+```javascript
+// ext/my-recovery.js
+export default {
+  name: "my-recovery",
+  execute: async (ctx) => {
+    console.log(`Recovering from: ${ctx.error.message}`);
+    return { status: "success" };
+  },
+};
+```
+
+通过扩展注册的策略会走完整链路：条目名登记为**已知策略**（YAML 的恢复链可以直接引用它），模块本身注册进恢复引擎的策略表。因此不需要再手工调用登记接口；只有绕过扩展、直接编程式注册时才需要自己登记策略名。可选的 `categories` 声明该策略适用的错误类别。
+
+### `recovery_patterns`（恢复模式）
+
+注册一个错误检测模式：模块必须导出 `name`、`category` 与 `match`，注册键取条目里的 `name`。
+
+```javascript
+// ext/my-pattern.js
+export default {
+  name: "my-pattern",
+  category: "session_error",
+  match: (error) =>
+    error && error.code === "MY_PATTERN"
+      ? { category: "session_error", message: String(error) }
+      : null,
+};
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string | 模式名（模块必须导出，注册键取条目 `name`） |
+| `category` | string | 该模式归属的错误类别，如 `session_error` |
+| `match` | function | `(error) => RecoveryError \| null`，命中返回错误对象，未命中返回 `null` |
+
+模式按注册顺序追加进模式表：`detectFirst` 与 `detectCategory` 都取**第一个**命中项，所以顺序有意义；同名模式不会去重。单个模式在匹配时抛错只会被跳过，不影响其他模式。
+
+### `notification_channels`（通知通道）
+
+注册一种通知通道类型。条目用 `kind` 而不是 `name`；模块导出 `create(config)` 工厂，返回带 `kind`、`send(message)`、`dispose()` 的通道对象。
+
+```javascript
+// ext/slack-channel.js
+export default {
+  create: (config) => ({
+    kind: "slack",
+    send: async (message) => {
+      await fetch(config.webhookUrl, { method: "POST", body: JSON.stringify({ text: message.text }) });
+    },
+    dispose: async () => {},
+  }),
+};
+```
+
+创建通道时先查自定义工厂、再落到内置通道，因此自定义 `kind` 可以覆盖同名内置通道。注册后即可在角色的通知配置里写 `kind: slack`。
+
+### `notification_events`（通知事件）
+
+只登记一个事件类型名，不加载 `module`——该作用域的条目即使写了 `module` 也不会被导入。
 
 ```yaml
 extensions:
@@ -102,248 +194,83 @@ extensions:
     - name: custom_event_occurred
 ```
 
-### Recovery Strategies（恢复策略）
+通知管理器发送通知前会校验事件类型是否属于内建集合：`idle`、`question`、`permission`、`error`、`dispatch_complete`、`dispatch_progress`、`loop_complete`、`approval_pending`、`session_deleted`、`custom`。集合之外的名称会被记录为 `Unknown notification event type` 并丢弃，所以自定义事件当前请复用内建的 `custom`。
 
-策略模块导出 `name` 和 `execute` 方法。`execute` 接收上下文对象并返回执行结果（合约定义见 `src/extensions/types.ts:85-90`）：
+### `observe_events`（观察事件）
 
-```javascript
-// ext/my-recovery.js
-export default {
-  name: "my-recovery",
-  execute: async (ctx) => {
-    // ctx 包含 sessionID、error、category 等信息
-    console.log(`Recovering from: ${ctx.error.message}`);
-    return { status: "success" };
-  },
-};
-```
-
-::: tip 恢复策略注册
-自定义恢复策略除了实现模块合约外，还需要通过 `RecoveryEngine.registerStrategy()`（`src/recovery/engine.ts:163-166`）注册，并调用 `addKnownStrategy()`（`src/recovery/config.ts:101-103`）登记到已知策略列表，确保 YAML 配置验证通过。详见[错误处理](./error-handling#恢复系统-recovery-system)。
-:::
-
-### Recovery Patterns（恢复模式）
-
-恢复模式模块导出 `name`、`category` 和 `match` 方法。`match` 接收错误对象，命中时返回 `RecoveryError`（或任意非空对象），否则返回 `null`（合约定义见 `src/extensions/types.ts:92-100`）：
-
-```javascript
-// ext/my-pattern.js
-export default {
-  name: "my-pattern",
-  category: "session_error",
-  match: (error) => {
-    return error && error.code === "MY_PATTERN"
-      ? { category: "session_error", message: String(error) }
-      : null;
-  },
-};
-```
-
-### Termination Conditions（终止条件）
-
-终止条件模块导出 `parse` 方法，接收原始值和可用代理列表，返回 `LoopCondition` 对象或 `null`（合约定义见 `src/extensions/types.ts:79-82`）：
-
-```javascript
-// ext/my-termination.js
-export default {
-  parse: (value, availableAgents) => {
-    if (typeof value !== "object" || value === null) return null;
-    if (value.type === "max_errors") {
-      return {
-        type: "max_errors",
-        maxErrors: value.count ?? 3,
-      };
-    }
-    return null;
-  },
-};
-```
-
-### Observe Events（观察事件）
-
-观察事件模块导出 `handle` 方法，接收上下文和规格对象，返回字符串数组（合约定义见 `src/extensions/types.ts:113-116`）：
+注册一个以事件名为键的观察处理器：模块导出 `handle(ctx, spec)`，返回要注入的字符串数组，`spec` 是函数 `observe:` 里对应的那条声明（用 `spec.on` 比对事件名）。
 
 ```javascript
 // ext/dispatch-event.js
 export default {
-  handle: (ctx, spec) => {
-    // ctx 包含 sessionID、agent、activeFns 等信息
-    // spec 包含观察配置（event、filter 等）
-    const injects = [];
-    if (ctx.sessionID && spec.event === "dispatch_complete") {
-      injects.push(`[observe] dispatch completed for session ${ctx.sessionID}`);
-    }
-    return injects;
-  },
+  handle: (ctx, spec) => (spec.on === "dispatch_complete" ? ["[observe] 调度全部完成"] : []),
 };
 ```
 
-### Concurrency Policies（并发策略）
+模块也可以导出 `capability: true`，此时第一个参数换成只读的观察能力对象：
 
-并发策略模块导出 `create` 工厂函数，接收调度配置默认值，返回自定义 `IConcurrencyManager` 实现（合约定义见 `src/extensions/types.ts:131-142`）：
+| 能力成员 | 说明 |
+|---|---|
+| `sessionID` / `eventName` | 会话 ID 与事件名 |
+| `toolName` / `toolArgs` / `toolOutput` | 事件来自工具调用时的工具信息 |
+| `lastAssistantText` | 事件触发前最后一条助手文本 |
 
 ```javascript
-// ext/priority-concurrency.js
+// 能力模式下同样用 spec.on 比对事件名
 export default {
-  create: ({ defaultLimit, maxQueueDepth, reserved, retryAfterMs }) => {
-    return {
-      // 实现 IConcurrencyManager 接口
-      acquireBackground: (key, opts) => { /* ... */ },
-      acquireSync: (key) => { /* ... */ },
-      release: (key, parentId) => { /* ... */ },
-      // ... 其他接口方法
-    };
-  },
+  capability: true,
+  handle: (cap, spec) => (spec.on === cap.eventName ? [`[observe] ${cap.eventName}`] : []),
 };
 ```
 
-## 安全机制
+## 注册流程
 
-- 扩展加载失败会按模块捕获，记录警告并跳过 —— 不会导致 Agent 崩溃。
-- 空的或缺失的 `extensions:` 块为无操作。
-- 内置词汇表（条件、拓扑、策略、通道）保持不变 —— 扩展是**增量式**的。
-- 模块加载使用动态 `import()` 并带缓存（与自定义 Hook 使用相同的模式）。
+插件初始化时按下面的顺序处理每个角色的 `extensions:`：
 
-::: warning 模块缓存
-扩展模块通过动态 `import()` 加载后会被 Node.js 模块缓存系统缓存。这意味着在同一个进程生命周期内，重复加载同一路径的模块会返回**同一个模块实例**，而不会重新执行模块代码。如果你在开发扩展时需要热重载，需要重启进程或使用 `?version=` 等 URL 参数破坏缓存（适用于支持 URL 导入的场景）。
-:::
+1. 读取角色的 `extensions:` 块；块缺失或为空则整步是 no-op。
+2. 逐作用域交给对应的扩展点，扩展点逐条加载模块：绝对路径直接使用，相对路径按运行时工作目录拼接。
+3. 模块按绝对路径缓存，同一路径只导入一次；加载失败记录 `Failed to load extension module` 警告并返回空，该条目被跳过，其余条目继续加载。
+4. 加载成功的模块按作用域注册，注册键是条目里的 `name`（`notification_channels` 用 `kind`）。
+5. 恢复策略与恢复模式额外桥接进恢复引擎：策略同时登记为已知策略，模式注册进模式表。
 
-## 扩展注册流程详解
+| 作用域 | 注册到 | 冲突行为 |
+|---|---|---|
+| `conditions` | 命名条件表 | 覆盖并记警告 |
+| `graph_topologies` | 拓扑表 + 图模板合法取值集合 | 覆盖并记警告 |
+| `recovery_strategies` | 已知策略表 + 恢复引擎策略表 | 后注册覆盖先注册 |
+| `recovery_patterns` | 恢复引擎模式表（按注册顺序追加） | 不去重，顺序决定命中优先级 |
+| `notification_channels` | 通道工厂表 | 覆盖；自定义优先于内置通道 |
+| `notification_events` | 事件名登记 | 后注册覆盖先注册 |
+| `observe_events` | 观察处理器表 | 后注册覆盖先注册 |
 
-扩展从 YAML 声明到运行时生效，经历以下注册流程（验证自 `src/extensions/registry.ts` 和 `src/extensions/loader.ts`）：
+## 接线现状
 
-```mermaid
-sequenceDiagram
-    participant YAML as role.yaml
-    participant Reg as ExtensionRegistry
-    participant Point as ExtensionPoint
-    participant Loader as loadExtensionModule()
+注册成功不等于运行时会用到它。当前版本各作用域的实际使用情况：
 
-    YAML->>Reg: loadExtensions(config, roleDir)
-    Reg->>Reg: 遍历 config 中各 scope
-
-    loop each scope (conditions, recovery_strategies, ...)
-        Reg->>Point: point.load(entries, roleDir)
-        Point->>Loader: loadExtensionModule(modulePath, roleDir)
-
-        alt module exists
-            Loader->>Loader: import(abs) —— 动态加载
-            Note over Loader: 使用缓存（Map<string, ExtensionModule>）
-            Loader-->>Point: ExtensionModule
-            Point->>Point: 注册模块功能
-        else module missing or error
-            Loader-->>Point: null
-            Note over Point: 记录警告，跳过该扩展
-            Point->>Point: 跳过注册，继续下一个
-        end
-    end
-
-    Reg-->>YAML: 加载完成
-```
-
-### 关键源码实现
-
-**`loadExtensionModule()`**（`src/extensions/loader.ts:15-34`）是模块加载的核心：
-
-```typescript
-// @src/extensions/loader.ts:15-34
-export async function loadExtensionModule(
-  modulePath: string,
-  roleDir: string,
-): Promise<ExtensionModule | null> {
-  const abs = isAbsolute(modulePath)
-    ? modulePath
-    : join(roleDir, modulePath);
-
-  if (cache.has(abs)) return cache.get(abs)!;  // 缓存命中
-
-  try {
-    const mod = (await import(abs)) as ExtensionModule;
-    cache.set(abs, mod);
-    return mod;
-  } catch (err) {
-    log.warn("Failed to load extension module", { modulePath: abs, err });
-    cache.set(abs, null);
-    return null;
-  }
-}
-```
-
-关键行为：
-- **路径解析**：绝对路径直接使用，相对路径拼接 `roleDir`
-- **模块缓存**：同路径只加载一次，后续返回缓存结果（`src/extensions/loader.ts:7`）
-- **错误隔离**：加载失败返回 `null` 并写入 `null` 缓存，绝不抛出异常
-
-**`ExtensionRegistry.loadExtensions()`**（`src/extensions/registry.ts:96-109`）是整个流程的调度入口：
-
-```typescript
-// @src/extensions/registry.ts:96-109
-async loadExtensions(config, roleDir): Promise<void> {
-  if (!config) return;                    // 空配置 → 无操作
-
-  for (const [scope, entries] of Object.entries(config)) {
-    if (!entries) continue;
-    const point = this.points.get(scope);  // 按 scope 查找 ExtensionPoint
-    if (point) {
-      await point.load(entries, roleDir); // 委托给对应扩展点
-    }
-  }
-}
-```
-
-### ExtensionPoint 分发机制
-
-9 个内置扩展点各对应一个作用域（`src/extensions/registry.ts:38-65`），`ExtensionRegistry` 构造时注册：
-
-::: info 扩展点分类说明
-9 种扩展作用域涵盖了 rolebox 中所有可扩展的封闭词汇表。其中 `recovery_strategies` 和 `recovery_patterns` 共享恢复域，`notification_channels` 和 `notification_events` 共享通知域。选择作用域时，明确你要扩充的是逻辑（条件/策略）、结构（拓扑/模式）还是通道（通知）。
-:::
-
-| 扩展点 | 作用域 | 类名 |
-|--------|--------|------|
-| 自定义条件 | `conditions` | `ConditionExtensionPoint` |
-| 图拓扑 | `graph_topologies` | `GraphTopologyExtensionPoint` |
-| 终止条件 | `termination_conditions` | `TerminationConditionExtensionPoint` |
-| 恢复策略 | `recovery_strategies` | `RecoveryStrategyExtensionPoint` |
-| 恢复模式 | `recovery_patterns` | `RecoveryPatternExtensionPoint` |
-| 通知通道 | `notification_channels` | `NotificationChannelExtensionPoint` |
-| 通知事件 | `notification_events` | `NotificationEventExtensionPoint` |
-| 观察事件 | `observe_events` | `ObserveEventExtensionPoint` |
-| 并发策略 | `concurrency_policies` | `ConcurrencyPolicyExtensionPoint` |
-
-### recovery_strategies 扩展与恢复系统的集成
-
-`recovery_strategies` 作用域的扩展模块通过 `ExtensionRegistry.getLoadedStrategies()`（`src/extensions/registry.ts:79-81`）暴露给 `RecoveryService`。`RecoveryService` 在初始化时获取已加载的策略，并通过 `RecoveryEngine.registerStrategy()`（`src/recovery/engine.ts:163-166`）注册到引擎。
-
-所以通过扩展注册的自定义恢复策略走以下完整链路：
-
-```
-role.yaml
-  → extensions.recovery_strategies
-    → ExtensionRegistry.loadExtensions()
-      → RecoveryStrategyExtensionPoint.load()
-        → loadExtensionModule() → import()
-  → RecoveryService.init()
-    → engine.registerStrategy(strategy)
-      → strategyRegistry.register() + addKnownStrategy()
-```
-
-::: tip
-如果自定义恢复策略需要通过扩展注册，务必同时调用 `addKnownStrategy()`（`src/recovery/config.ts:101-103`）将策略名称登记到已知策略列表，否则 YAML 配置验证会静默跳过该策略。详见[恢复系统](./recovery-system#扩展-api)。
-:::
-
-### 相关源码
-
-| 文件 | 说明 |
+| 作用域 | 运行时是否消费 |
 |---|---|
-| `src/extensions/types.ts:85-142` | 扩展模块合约定义（8 种合约接口） |
-| `src/extensions/loader.ts:15-34` | `loadExtensionModule()` 模块加载器 |
-| `src/extensions/registry.ts:38-109` | `ExtensionRegistry` + 9 个内置扩展点 |
-| `src/extensions/extension-point.ts` | `ExtensionPoint<T>` 基础接口 |
-| `src/recovery/config.ts:101-103` | `addKnownStrategy()` 已知策略注册 |
-| `src/recovery/engine.ts:163-166` | `registerStrategy()` 策略引擎注册 |
+| `conditions` | 是——命名条件在函数 frontmatter 的 `gate` / `transition` / `continue_until` 求值时使用 |
+| `recovery_strategies` | 是——恢复链按策略名查找并调用 `execute` |
+| `recovery_patterns` | 是——错误分类时按模式表匹配 |
+| `notification_channels` | 是——创建通道时先查自定义工厂 |
+| `graph_topologies` | 否——拓扑展开器没有运行时调用点（自定义拓扑名仍会进入图模板合法取值集合） |
+| `notification_events` | 否——发送前的事件类型闸门只接受内建事件类型 |
+| `observe_events` | 否——观察处理器表没有运行时调用点 |
 
-## 下一步
+## 安全机制与注意事项
 
-- [运行时行为](/04-Advanced/runtime-behavior) — 协作图运行时状态管理与终止评估
-- [Hook 机制](./hooks) — 了解如何通过 Hook 系统拦截和扩展运行时行为
+- **故障隔离**：加载或注册失败的条目只影响自己——记录警告后跳过，不影响同一角色的其他扩展、其他角色的扩展与插件启动。
+- **增量开放**：内置词汇表（条件、拓扑、恢复策略与模式、通知通道与事件）保持不变，扩展只做加法；空配置或缺失的 `extensions:` 块不改变任何行为。
+- **模块缓存**：模块按解析后的绝对路径缓存，失败结果同样入缓存，后续同路径请求不再重试；热重载会清空扩展模块的加载缓存。开发期间改动模块代码后，重启进程最保险。
+- **进程级作用域**：所有角色的扩展注册进同一批表，不按角色隔离；角色被移除或热重载后，已注册的扩展不会被撤回。
+- **能力对象只读**：`capability: true` 时处理器拿到的是只读能力对象，写不进函数状态与制品，改动内部结构必须走默认的完整环境写法。
+
+## 平台支持
+
+| Harness | `extensions:` 是否生效 |
+|---|---|
+| opencode | 生效——插件初始化时装配扩展服务并加载每个角色的声明 |
+| pi | 不生效——Pi 的服务栈不装配扩展服务，声明被忽略 |
+| dsh | 不生效——同上 |
+
+在 pi 与 dsh 上，角色里的 `extensions:` 块不会报错也不会生效；需要扩展能力时请在 opencode 上运行。三套 harness 的目录与能力总览见[平台与 Harness](/01-Overview/platform-harnesses)。

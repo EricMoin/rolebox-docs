@@ -1,613 +1,319 @@
 ---
 title: 编写技能
-description: 创建和管理 SKILL.md 技能模块 — 格式、引用、解析顺序和去重机制
+description: 从零写一个 SKILL.md —— frontmatter 字段、技能级引用、组合与去重、验证与排错
 ---
 
-# 编写技能
+# 编写技能（Authoring Skills）
 
-> **相关文档：** [技能系统](/02-Guide/skills) — 技能解析顺序与加载机制 | [引用文档](/02-Guide/references) — 引用文档的自动发现与声明 | [创建角色](/02-Guide/create-a-role) — 完整的角色创建指南
+技能（Skill）是一份带 YAML frontmatter 的 Markdown：系统提示只取其中的名称与描述，正文在代理需要时才加载。本页面向技能作者，先走一遍「建目录 → 写 SKILL.md → 声明 → 验证」的最小流程，再逐个说明 frontmatter 字段、技能级引用、多技能的组合与去重，以及写错时怎么查；技能由谁加载、按什么顺序解析见[技能系统](/02-Guide/skills)。
 
-技能是按需加载的知识模块——这是"渐进式披露（progressive disclosure）"的体现：系统提示只展示技能的名称与描述，代理真正需要时才加载完整内容。与函数不同（函数一旦激活就持续存在），技能通过 `skill` 工具在需要时按上下文加载。
+> 相关：[技能系统](/02-Guide/skills)｜[引用文档](/02-Guide/references)｜[创建角色](/02-Guide/create-a-role)
 
-## SKILL.md 格式
+## 最小示例：5 分钟做一个技能
 
-每个技能是一个带有 YAML frontmatter（即 Markdown 文件顶部用 `---` 包裹的元数据块）的 Markdown 文件，文件必须命名为 `SKILL.md`。
+下面的例子给 `code-reviewer` 角色加一个带引用文档的 `code-review-checklist` 技能。
 
-### 目录结构
-
-技能可以通过两种方式组织：
-
-**单文件形式：**
-```
-{roleDir}/skills/review-checklist.md
-```
-
-**目录形式（推荐，支持引用）：**
-```
-{roleDir}/skills/review-checklist/
-├── SKILL.md
-└── references/              # 可选 — 技能专有的引用文档
-    └── best-practices.md
-```
-### 目录形式 vs 单文件形式：选型指南
-
-| 场景 | 推荐形式 | 原因 |
-|------|---------|------|
-| 技能内容简短（< 50 行），无外部引用 | 单文件形式 | 文件数量最少，管理成本低 |
-| 技能需要引用文档作为参考材料 | 目录形式 | `references/` 目录自动发现机制开箱即用 |
-| 技能包含长篇幅说明、代码示例或多语言版本 | 目录形式 | 引用分离使 SKILL.md 保持专注和可维护 |
-| 技能在多个角色间共享 | 目录形式 | 便于后期扩展引用，兼容全局部署 |
-| 快速原型或实验性技能 | 单文件形式 | 无需创建目录，从单文件起步成本最低 |
-| 技能需要声明 `allowed-tools` | 两者均可 | 该字段不依赖目录结构，单文件同样支持 |
-
-单文件形式适合小规模、自包含的知识提示。一旦技能需要引用文档、代码清单或多语言内容，应迁移到目录形式。
-
-
-
-### Frontmatter 规范
-
-```yaml
----
-name: review-checklist
-description: Comprehensive code review checklist
-model: gpt-4              # 可选 — 建议使用的模型
-license: MIT              # 可选 — 许可标识
-compatibility: claude-code opencode  # 可选 — 工具兼容性声明
-allowed-tools: Read, Grep, Glob       # 可选 — 允许的工具
-references:                            # 可选 — 显式引用声明
-  best-practices: references/best-practices.md
-  coding-standards:
-    path: docs/standards.md
-    description: Team coding conventions
----
-```
-
-| Frontmatter 字段 | 类型 | 必需 | 描述 |
-|-----------------|------|------|------|
-| `name` | string | 建议 | 技能名称，如果未提供则从目录名推导 |
-| `description` | string | 是 | 人类可读的描述，显示在技能列表中 |
-| `model` | string | 否 | 推荐使用的模型标识 |
-| `license` | string | 否 | 许可标识 |
-| `compatibility` | string | 否 | 工具兼容性声明 |
-| `allowed-tools` | string \| array | 否 | 允许的工具列表 |
-| `references` | object | 否 | 显式引用文件声明 |
-
-### 技能内容示例
-
-```markdown
----
-name: review-checklist
-description: Comprehensive code review checklist
-references:
-  security-guide: references/security-guide.md
----
-
-When reviewing code, check:
-
-### Correctness
-- Error handling completeness
-- Input validation at all entry points
-- Type safety and null handling
-- Edge cases (empty inputs, boundary values)
-
-### Performance
-- Unnecessary allocations
-- Loop efficiency
-- Cache utilization opportunities
-
-### Security
-- SQL injection / XSS prevention
-- Authentication and authorization checks
-- Sensitive data exposure
-```
-
-## 引用声明
-
-技能可以声明自己的引用文档，这些引用会在技能加载时自动解析。
-
-### 显式引用
-
-在 SKILL.md 的 frontmatter 中声明的引用：
-
-```markdown
----
-references:
-  api-spec: references/api-spec.md
-  design-guide:
-    path: docs/design-guide.md
-    description: Custom description
----
-```
-
-引用解析实现在 `src/resolver/reference-resolver.ts:135-174`：
-- `path` 相对于技能目录解析
-- 可选的 `description` 覆盖自动生成的描述
-- 如果文件不存在，引用会被跳过并记录日志
-
-### 自动发现
-
-技能目录下的 `references/` 目录中的 Markdown 文件会被自动发现（`src/resolver/reference-resolver.ts:97-128`）：
-
-```
-{roleDir}/skills/review-checklist/
-├── SKILL.md
-└── references/
-    ├── security-guide.md      # 自动发现
-    └── performance-tips.md    # 自动发现
-```
-
-自动发现的文件的描述来自：
-1. 文件的 YAML frontmatter 中的 `description` 字段（`src/resolver/reference-resolver.ts:46-91`）
-2. 如果无 frontmatter，则从文件名推导（`deriveDescriptionFromName`，`src/resolver/reference-resolver.ts:32-37`）
-
-### 解析顺序
-
-引用解析遵循以下优先级（`src/resolver/reference-resolver.ts:184-216`）：
-
-1. 自动发现 `references/` 目录中的文件
-2. 显式声明覆盖自动发现的文件的描述
-3. 显式独有的条目（不在 `references/` 中的文件路径）附加到结果中
-4. 文件路径去重：同一文件路径的显式条目优先于自动发现
-
-## 解析顺序
-
-技能的加载和解析遵循固定的优先级（`src/resolver/skill-resolver.ts:17-34`）：
-
-1. `{roleDir}/skills/{name}/SKILL.md` — 角色本地目录形式（**最高优先级**）
-2. `{roleDir}/skills/{name}.md` — 角色本地单文件形式
-3. `~/.config/opencode/skills/{name}/SKILL.md` — 全局目录形式
-4. `~/.config/opencode/skills/{name}.md` — 全局单文件形式
-
-解析实现在 `src/resolver/skill-resolver.ts:43-118`：
-- 使用 `fast-glob` 批量匹配所有候选模式以提高性能
-- 对于每个技能名，按顺序检查 4 个候选位置，第一个存在的文件胜出
-- 如果所有位置都找不到技能，会记录日志并静默跳过
-
-## 多角色引用去重
-
-当多个角色加载同一技能时，引用文档可能重复。去重机制（`src/resolver/reference-resolver.ts:201-216`）：
-
-- 引用按**绝对文件路径**去重（`byPath` Map）
-- 显式声明的引用优先于自动发现的引用（保留显式 `description`）
-- 最终结果按名称排序以保证确定性输出
-
-## 技能与函数对比
-
-| 维度 | 技能 (Skill) | 函数 (Function) |
-|------|-------------|-----------------|
-| 激活方式 | 代理通过 `skill` 工具按需加载 | 用户通过 `\|name\|` 语法激活 |
-| 生命周期 | 单次调用 | 持久化到会话结束 |
-| 目的 | 参考知识 | 行为修改 |
-| 注入方式 | 按需注入到上下文 | 活跃时始终在系统提示中 |
-| 引用管理 | 支持引用声明和自动发现 | 无内置引用管理 |
-| 参数化 | 无 | 支持参数化（位置/键值对） |
-
-## 引用加载机制
-
-引用文档的加载路径（`src/resolver/reference-resolver.ts`）：
-
-```
-技能目录             角色目录              全局目录
-{sR}/references/    {role}/references/    ~/.config/opencode/references/
-     │                    │                       │
-     └──────┬─────────────┴──────┬────────────────┘
-            │                    │
-      自动发现               显式声明
-   fg("**/*.md")           role.yaml references:
-```
-
-## 技能引用解析
-
-技能加载时，`resolveSkills`（`src/resolver/skill-resolver.ts:43-106`）并行解析所有匹配技能的引用文档。
-
-### 解析流程
-
-```
-resolveSkills(skillNames, roleDir, globalSkillsDir)
-├── 第 1 轮：批量 glob 匹配 — 对所有候选路径使用 fast-glob
-│   ├── 按优先级检查每个技能名的 4 个候选位置
-│   │   ├── {roleDir}/skills/{name}/SKILL.md
-│   │   ├── {roleDir}/skills/{name}.md
-│   │   ├── {globalDir}/{name}/SKILL.md
-│   │   └── {globalDir}/{name}.md
-│   └── 第一个存在的文件胜出（早期匹配短路）
-│
-├── 第 2 轮：并行解析（Promise.all）
-│   ├── 读取文件内容并解析 frontmatter（`parseFrontmatter`）
-│   ├── 从 frontmatter 提取 description
-│   └── 调用 resolveAllReferences(skillDir, ReferenceScope.Skill, references)
-│       ├── 自动发现 references/ 目录中的 Markdown 文件
-│       ├── 合并显式声明的引用（可覆盖 description）
-│       ├── 按绝对路径去重
-│       └── 按名称排序后返回
-│
-└── 未找到的技能名静默跳过（不抛异常）
-```
-
-`resolveAllReferences` 的调用发生在 `src/resolver/skill-resolver.ts:95-99`：
-
-```typescript
-// Second pass: read files and resolve references in parallel
-const resolved: ResolvedSkill[] = await Promise.all(
-  winners.map(async ({ name, filePath, scope }) => {
-    const content = await Bun.file(filePath).text();
-    const { metadata } = parseFrontmatter(content);
-    description = metadata.description ?? "";
-
-    const skillDir = dirname(filePath);
-    references = await resolveAllReferences(
-      skillDir,
-      ReferenceScope.Skill,
-      metadata.references as SkillMetadata["references"],
-    );
-    // ...返回 { name, description, scope, filePath, references }
-  }),
-);
-```
-
-### 引用作用域
-
-技能引用使用 `ReferenceScope.Skill` 作用域（`src/resolver/reference-resolver.ts`），与角色级引用（`ReferenceScope.Role`）共享相同的解析逻辑，但路径相对于技能目录解析。
-
-## 测试技能
-
-> **提示**：使用内置的 `skill_compose` 工具验证技能组合的兼容性。
->
-> ```
-> |skill_compose skill_names=["review-checklist", "security-audit"]|
-> ```
->
-> `skill_compose` 会分析指定技能之间是否存在以下冲突：
-> - **引用路径冲突**：两个技能引用同名但不同路径的文档
-> - **工具权限冲突**：两个技能声明冲突的 allowed-tools
->
-> 该工具还自动对技能引用进行**去重**（按绝对路径合并），确保组合后的引用集合无冗余。
-
-## 实践建议
-
-1. **使用目录形式**：目录形式支持引用文档，使技能更加自包含
-2. **提供描述**：frontmatter 中的 `description` 帮助代理判断何时加载技能
-3. **引用分离**：将大段参考知识放入 `references/` 目录，保持 SKILL.md 简洁
-4. **版本控制**：将技能与其引用文档一起纳入版本管理
-
-## 端到端实践：从零构建一个 code-review-checklist 技能
-
-本节演示从目录创建到加载验证的完整流程。以 `code-review-checklist` 为例，逐步构建一个包含引用文档的技能。
-
-### 步骤 1：创建目录结构
-
-在角色目录下创建技能目录和引用目录：
+### 1. 建目录
 
 ```bash
-mkdir -p my-role/skills/code-review-checklist/references
+mkdir -p code-reviewer/skills/code-review-checklist/references
+find code-reviewer/skills/code-review-checklist
 ```
 
-目录结构如下：
-```
-my-role/skills/code-review-checklist/
-├── SKILL.md
-└── references/
-    └── security-guide.md      # 安全审查参考文档
+```text
+应看到：
+
+code-reviewer/skills/code-review-checklist
+code-reviewer/skills/code-review-checklist/references
 ```
 
-### 步骤 2：编写 SKILL.md
+### 2. 写 SKILL.md
 
-创建 `my-role/skills/code-review-checklist/SKILL.md`：
+`code-reviewer/skills/code-review-checklist/SKILL.md`：
 
 ```markdown
 ---
 name: code-review-checklist
-description: 代码审查清单 — 检查正确性、安全性、性能和风格
-license: MIT
-compatibility: opencode
-allowed-tools:
-  - Read
-  - Grep
-  - Glob
+description: 代码审查清单 — 检查正确性、安全性、性能
 references:
   security-guide: references/security-guide.md
 ---
 
 # Code Review Checklist
 
-## Correctness
+## 正确性
 - 是否处理了所有边界情况（空输入、极值、并发竞态）？
 - 错误路径是否被妥善处理（重试、回退、降级）？
-- 类型安全和空值处理是否完整？
 
-## Security
-- 输入是否经过验证和清理？
+## 安全性
+- 输入是否在服务端验证并清理？
 - 是否存在注入漏洞（SQL / XSS / 命令注入）？
-- 敏感信息（密钥、令牌）是否被硬编码？
+- 敏感信息是否被硬编码？
 
-## Performance
+## 性能
 - 是否存在 N+1 查询或冗余循环？
 - 缓存策略是否合理？
-- 是否有明显的优化空间（如不必要的内存分配）？
 ```
 
-引用文档 `security-guide.md` 提供了详细的安全审查规则，`SKILL.md` 本身保持精简。
+### 3. 写引用文档
 
-### 步骤 3：创建引用文档
-
-创建 `my-role/skills/code-review-checklist/references/security-guide.md`：
+`code-reviewer/skills/code-review-checklist/references/security-guide.md`：
 
 ```markdown
 ---
-description: OWASP 驱动的安全审查规则，覆盖认证、授权、输入验证和数据保护
+description: OWASP 驱动的安全审查规则，覆盖认证、授权、输入验证与数据保护
 ---
 
 # 安全审查指南
 
-### 认证与授权
-- 是否使用标准的认证机制（OAuth 2.0 / OpenID Connect）？
-- 权限检查是否在每个端点执行（不仅是前端隐藏）？
-- 会话管理是否安全（HttpOnly Cookie、CSRF Token）？
+## 认证与授权
+- 是否使用标准认证机制（OAuth 2.0 / OpenID Connect）？
+- 权限检查是否在每个端点执行，而不只是前端隐藏？
 
-### 输入验证
-- 所有用户输入是否在服务端验证（不仅是客户端）？
-- 是否对文件上传做了类型和大小限制？
-- 是否存在 SSRF（服务端请求伪造，Server-Side Request Forgery）或路径遍历风险？
+## 输入验证
+- 是否对文件上传做了类型与大小限制？
+- 是否存在 SSRF 或路径遍历风险？
 
-### 数据保护
-- 敏感数据是否在传输和存储时加密？
-- 日志中是否可能泄漏个人身份信息（PII）？
-- API（应用程序接口，Application Programming Interface）响应是否过度暴露内部数据结构？
+## 数据保护
+- 敏感数据在传输与存储时是否加密？
+- 日志中是否可能泄漏个人身份信息？
 ```
 
-这个引用文档会自动被 `resolveAllReferences` 发现（`src/resolver/reference-resolver.ts:97-128`），无需在 SKILL.md 中声明路径即可加载。这里在 frontmatter 中显式声明它，以便在加载时提供自定义描述。
+这个文件放在技能的 `references/` 目录里，会被自动发现；上一步在 frontmatter 中再次声明它，是为了给它一个更精确的描述（也可省略声明，效果只是描述不同）。
 
-### 步骤 4：在 role.yaml 中注册
-
-在角色配置文件中声明技能引用：
+### 4. 在 role.yaml 中声明
 
 ```yaml
-# my-role/role.yaml
+# code-reviewer/role.yaml
 name: Code Reviewer
 description: 代码审查专家
 skills:
-  - code-review-checklist      # 从角色本地 skills 目录加载
-# …其他配置
+  - code-review-checklist
 ```
 
-注册后，解析器会按以下优先级搜索（`src/resolver/skill-resolver.ts:17-34`）：
+### 5. 验证
 
-1. `my-role/skills/code-review-checklist/SKILL.md` ✅ 目录形式 — 匹配成功
-2. `my-role/skills/code-review-checklist.md` — 跳过（上一步已匹配）
-3. `~/.config/opencode/skills/code-review-checklist/SKILL.md` — 跳过
-4. `~/.config/opencode/skills/code-review-checklist.md` — 跳过
-
-### 步骤 5：验证加载
-
-启动代理后，使用内置工具验证技能是否正常加载：
-
-```
-|skill_compose skill_names=["code-review-checklist"]|
+```bash
+rolebox sync opencode
+rolebox status
 ```
 
-输出应包含：
+```text
+应看到（示例输出，角色数量与路径随实际环境变化）：
 
-```
-## Skill Composition Analysis
+Rolebox v1.9.0
 
-**Requested:** code-review-checklist
+Installed Roles
+──────────────────────────────────────────────────
+  ✓ code-reviewer             1.0.0    (oh-my-role)  → synced
 
-### Found Skills
-| Skill | Source | References Count |
-|-------|--------|-----------------|
-| code-review-checklist | code-reviewer | 1 |
-
-### Combined References (deduplicated)
-| Name | Description | Source Skills |
-|------|-------------|--------------|
-| security-guide | OWASP 驱动的安全审查规则，覆盖认证、授权、输入验证和数据保护 | code-review-checklist |
-
-### Conflicts
-No conflicts detected.
-
-**Summary:** 1 skills found, 1 unique references, 0 conflicts, 0 missing.
+OpenCode Integration
+──────────────────────────────────────────────────
+  Plugin       ✓ registered
+  Sync target  ~/.config/opencode/rolebox
+  Synced       1/1 roles
+  Skill symlinks (2):
+    ✓ all valid
 ```
 
 验证要点：
 
-1. **技能名称正确** — `code-review-checklist` 出现在 Found Skills 表中
-2. **引用文档已解析** — `security-guide` 引用存在，描述与 frontmatter 一致
-3. **无冲突** — Conflicts 区显示 No conflicts detected
-4. **无缺失** — Summary 中 missing 计数为 0
+1. **名称一致** —— 目录名、`role.yaml` 中声明的名称、frontmatter 的 `name` 三者写法一致（目录名与声明名必须逐字符相同，大小写敏感）。
+2. **描述非空** —— `description` 会出现在系统提示的 `<available_skills>` 中，空描述等于让代理盲选。
+3. **引用可达** —— `references:` 中的路径相对技能目录，写错时该条被静默跳过。
+4. **组合无冲突** —— 用 `skill_compose` 跑一次组合分析（见下文）。
 
-如果技能加载失败，参见下方的[调试与排查](#调试与排查)节。
+## SKILL.md 的 frontmatter
 
-从创建目录到验证加载，整个流程约 5 分钟即可完成。这个模式适用于所有自包含技能。
-
-## 技能组合模式
-
-### 多技能协同
-
-一个角色可以注册多个技能，代理会根据上下文按需加载。合理的组合方式：
+把所有字段都写上的样子：
 
 ```yaml
-# role.yaml — 多技能注册
+---
+name: code-review-checklist
+description: 代码审查清单 — 检查正确性、安全性、性能
+model: gpt-4                       # 可选
+license: MIT                       # 可选
+compatibility: opencode            # 可选
+allowed-tools: Read, Grep, Glob    # 可选
+references:                        # 可选
+  security-guide: references/security-guide.md
+  team-standards:
+    path: ../../references/standards.md
+    description: 团队编码规范
+---
+```
+
+| 字段 | 类型 | rolebox 是否据此改变行为 | 说明 |
+|---|---|---|---|
+| `description` | string | 是 | 显示在系统提示的 `<available_skills>` 与组合分析输出中；缺失时为空字符串 |
+| `references` | object | 是 | 技能级引用声明，见下一节 |
+| `name` | string | 否 | 技能名以 `role.yaml` 的声明为准，文件按该名称命名即可 |
+| `model` / `license` / `compatibility` | string | 否 | 按 SKILL.md 的通行约定保留的元数据 |
+| `allowed-tools` | string \| array | 否 | 同上；是否生效取决于读取技能目录的 harness，rolebox 不解释它 |
+
+frontmatter 必须从文件开头开始（允许前导空白），用一对 `---` 包裹。YAML 解析失败时不会报错：该技能按「没有 frontmatter」处理，描述为空，正文照常加载。
+
+## 技能级引用
+
+技能可以带自己的 `references/` 目录，并在 frontmatter 里声明额外的引用：
+
+```yaml
+---
+references:
+  security-guide: references/security-guide.md
+  team-standards:
+    path: ../../references/standards.md
+    description: 团队编码规范
+---
+```
+
+- `path` 相对于**技能目录**解析，可以指向目录外的共享文档。
+- 简写形式只写路径；对象形式可以带 `description`，它会覆盖该文件自身 frontmatter 中的描述。
+- `references/` 目录下的 `.md` 会被递归自动发现，不必声明——声明只用于补充描述或引用目录外的文件。
+- 单文件形式的技能没有自己的目录，解析基准退化为 `skills/` 目录本身（引用要写成 `references/x.md`，实际指向 `skills/references/x.md`）。需要技能级引用时请用目录形式。
+
+自动发现、描述推导与去重的完整规则见[引用文档](/02-Guide/references)。
+
+## 组合与去重
+
+### 一个角色可以有多个技能
+
+```yaml
 skills:
-  - code-review-checklist    # 代码审查专业知识
-  - security-audit          # 安全审计专业技能
-  - performance-review      # 性能分析技能
+  - code-review-checklist    # 代码审查
+  - security-audit           # 安全审计
+  - performance-review       # 性能分析
 ```
 
-当一个任务涉及多个方面（如 PR 审查同时需要正确性、安全性和性能分析），代理可以根据任务描述自主决定加载哪些技能。
+代理按任务内容自行决定加载哪几个。技能之间的重叠由组合分析发现：
 
-### 技能组合分析（skill_compose）
-
-`skill_compose` 工具（`src/asset/skill-compose.ts`）是技能组合的核心验证工具，提供以下分析：
-
-#### 引用去重
-
-当两个技能引用同名但同路径的文档时，`deduplicateReferences`（`src/asset/skill-compose.ts:41-65`）按绝对文件路径合并引用：
-
-- 使用 `Map<filePath, DedupedReference>` 按路径去重
-- 合并后的引用保留所有来源技能的名称
-- 最终结果按名称排序以确保确定性输出
-
-```
-|skill_compose skill_names=["review-checklist", "security-audit"]|
+```text
+skill_compose(skill_names=["code-review-checklist", "security-audit"], check_conflicts=true)
 ```
 
-#### 冲突检测
+```text
+应看到（示例输出，路径与来源随实际角色变化）：
 
-`detectReferenceConflicts`（`src/asset/skill-compose.ts:75-103`）检测引用路径冲突：
+## Skill Composition Analysis
 
-- 按引用名称分组，收集所有涉及的 `(filePath, skillName)` 对
-- 如果同一名称的引用指向不同路径，标记为冲突
-- 冲突详细信息包括：冲突的引用名、涉及的路径、来源技能
+**Requested:** code-review-checklist, security-audit
 
-冲突输出示例：
+### Found Skills
 
-```
+| Skill | Source | References Count |
+|-------|--------|-----------------|
+| code-review-checklist | code-reviewer | 1 |
+| security-audit | code-reviewer | 2 |
+
+### Combined References (deduplicated)
+
+| Name | Description | Source Skills |
+|------|-------------|--------------|
+| security-guide | OWASP 驱动的安全审查规则，覆盖认证、授权、输入验证与数据保护 | code-review-checklist |
+| threat-model | 威胁建模模板 | security-audit |
+
 ### Conflicts
-- ⚠️ Reference "security-guide" exists at different paths:
-  /role-a/skills/review/references/security-guide.md vs
-  /role-b/skills/audit/references/security-guide.md
+
+No conflicts detected.
+
+**Summary:** 2 skills found, 2 unique references, 0 conflicts, 0 missing.
 ```
 
-#### 缺失技能检测
+### 去重与冲突规则
 
-当请求的技能名在所有已加载角色中都不存在时，`renderMissingSkills`（`src/asset/skill-compose.ts:169-181`）列出缺失项。每个缺失技能显示为：
+- **按绝对路径去重**：多个技能引用同一份文件时，组合结果只保留一条，并把所有来源技能名列在一起。
+- **同名不同路径 = 冲突**：两个技能都声明了名为 `guidelines` 的引用，但指向不同文件时，输出中出现以 `⚠️` 开头的冲突行，列出所有涉及的路径与来源技能。
+- **缺失技能**：请求了但任何已加载角色都没有的技能，单独列在 `Missing Skills` 中（形如 `❌ security-audit not found in any loaded role`）；一个都没匹配上时，工具直接返回 `No matching skills found for: ...`。
+- **跨角色复用**：每个角色独立解析自己的技能，互不影响。要让多个角色共享同一技能，把技能放到全局技能目录（各 harness 的取值见[技能系统](/02-Guide/skills)），再在各角色的 `skills:` 中声明同名技能。
 
-```
-### Missing Skills
-- ❌ security-audit not found in any loaded role
-```
+### 子代理的技能
 
-### 子代理技能继承
-
-子代理可以声明自己的技能，这些技能也会被 `collectSkills`（`src/asset/skill-compose.ts:15-30`）递归收集。递归遍历子代理时，来源路径格式为 `parentRole/subAgentId`：
+子代理可以在自己的 `subagents:` 条目里声明技能：
 
 ```yaml
-# team-lead/role.yaml
 subagents:
   - name: Researcher
+    description: 资料调研
+    prompt: You research topics and summarize findings.
     skills:
-      - research-checklist    # 子代理独有技能
+      - research-checklist
 ```
 
-在组合分析中，该技能的 source 显示为 `team-lead/researcher`，便于定位技能来源。
+在组合分析里，这类技能的 `Source` 是技能所属代理的完整 id 路径（形如 `{roleId}/{subAgentId}`；子代理 id 自带父级前缀，例如 `emperor/emperor--jinyiwei`），便于定位技能来自哪个角色或子代理。技能文件从 `subagents/{slug}/skills/` 解析，该目录不存在时回退到角色目录的 `skills/`。
 
-## 调试与排查
+## 测试技能
 
-### 常用调试命令
+技能写完到确认可用，中间有几步可以分别验证：
 
-**检查角色完整性：**
+| 手段 | 能证明什么 |
+|---|---|
+| `rolebox info <role>` | 技能名已在 `skills:` / `opencode_skills:` 中声明 |
+| `rolebox status` | harness 技能目录中的链接都指向真实文件（`all valid`，出现 `(broken)` 即为断链） |
+| `skill_compose` | 组合内引用可去重、无同名不同路径冲突、无缺失技能 |
+| `asset_validate` | 已加载角色的引用路径都存在——引用文件被删或改名时会报出来 |
+| `asset_inspect` | 按名称与类型读回某个资产解析出的 frontmatter，例如 `asset_inspect(name="code-review-checklist", type="skill")` |
+| 会话内实测 | 代理真的会为某个任务加载这个技能，并遵循其中的指令 |
 
-```bash
-rolebox info <role-name> --check   # 验证角色完整性哈希
+前两项用 CLI 跑（见上面的最小示例），后四项由代理在会话中调用。
+
+`rolebox info <role> --check` 会把角色目录的完整性哈希与安装时记录的指纹比对，用于确认文件没有被意外改动；本地改过角色（新增技能、改过 PROMPT.md 等）之后它必然报 `Integrity check FAILED`，这是预期结果，不代表技能写错了。
+
+## 排错
+
+### 技能未找到
+
+```text
+日志中的一条记录（JSON 行，节选）：
+
+{"0":"Skill \"code-review-checklist\" not found. Searched:","1":{"candidates":[".../skills/code-review-checklist/SKILL.md",".../skills/code-review-checklist.md"]},"_meta":{"name":"skill-resolver","logLevelName":"INFO"}}
 ```
 
-`--check` 标志（`docs/cli.md:120`）会计算并验证角色的完整性哈希，确保所有声明文件（包括技能）与预期一致。
+- **目录名不符**：目录形式要求目录名与声明名逐字符相同（大小写敏感）。
+- **文件名不对**：目录形式必须包含 `SKILL.md`，单文件形式必须是 `{name}.md`。
+- **放错位置**：先查角色本地 `{roleDir}/skills/`，再查全局技能目录；两者都没有就跳过。
 
-**查看解析日志：**
+### 文件读取失败
 
-rolebox 的解析器会输出详细的调试日志。关键日志点包括：
+```text
+日志中的一条记录（节选）：
 
-| 日志级别 | 来源 | 触发条件 |
-|---------|------|---------|
-| `info` | `skill-resolver.ts:113` | 技能在所有候选路径中未找到 |
-| `debug` | `skill-resolver.ts:102` | 技能文件存在但读取失败（如格式错误） |
-| `info` | `reference-resolver.ts:151` | 显式引用的文件目标不存在 |
-| `debug` | `reference-resolver.ts:88` | 引用文件读取失败 |
-
-**显式设置日志级别：**
-
-```bash
-LOG_LEVEL=debug rolebox <command>   # 启用 debug 级日志以查看更多细节
+{"0":"Failed to read skill file","1":{"filePath":".../skills/code-review-checklist/SKILL.md","error":{...}},"_meta":{"name":"skill-resolver","logLevelName":"DEBUG"}}
 ```
 
-### 常见加载错误
+- **YAML 语法错误**：frontmatter 不是合法 YAML 时按无 frontmatter 处理，描述为空；用 `asset_inspect` 读回可见。
+- **编码问题**：文件不是 UTF-8。
 
-#### 1. 技能未找到（Not Found）
+### 引用文件不存在
 
-```
-[skill-resolver] Skill "my-skill" not found. Searched:
-  candidates: [
-    ".../skills/my-skill/SKILL.md",
-    ".../skills/my-skill.md",
-    "...
-  ]
+```text
+日志中的一条记录（节选）：
+
+{"0":"Skipping reference \"security-guide\": file not found at \"references/security-guide.md\"","_meta":{"name":"reference-resolver","logLevelName":"INFO"}}
 ```
 
-**原因与修复：**
+- **路径基准错**：`path` 相对技能目录，不是相对角色目录。
+- **声明了但没建文件**：该条被静默跳过，技能正文照常加载；用 `asset_validate` 可以把这类断链一次性列出来。
 
-- **路径错误**：检查技能目录是否在正确的 `skills/` 目录下（角色本地或全局）
-- **命名不匹配**：确保 role.yaml 中的名称与 SKILL.md 的 `name` 字段或目录名一致
-- **文件名错误**：目录形式的技能必须包含 `SKILL.md` 文件（注意大小写）
+### 引用路径冲突
 
-#### 2. 文件读取失败
+组合分析出现 `⚠️ Reference "guidelines" exists at different paths` 时，说明两个技能各自维护了同名但不同文件的引用：
 
-```
-[skill-resolver] Failed to read skill file
-  filePath: ".../skills/my-skill/SKILL.md"
-  error: ...
-```
+- **合并**：把两份文档合成一份放在共享位置（例如角色级 `references/`，或一个两处都能用显式声明指向的公共目录），两边都改成同一条路径。
+- **改名**：如果两份文档确实不同，改掉其中一个引用名（例如 `frontend-guidelines` / `backend-guidelines`），消除歧义。
 
-**原因与修复：**
+## 快速排查清单
 
-- **YAML 格式错误**：frontmatter 中的 YAML 语法不正确，使用 `js-yaml` 解析失败时静默回退为空描述（`skill-resolver.ts:100-103`）
-- **编码问题**：文件不是 UTF-8 编码
-
-#### 3. 引用文件不存在
-
-```
-[reference-resolver] Skipping reference "security-guide":
-  file not found at "references/security-guide.md"
-```
-
-**原因与修复：**
-
-- **路径错误**：引用路径相对于技能目录解析，确认文件确实在预期位置
-- **文件缺失**：在 frontmatter 中声明了引用但忘记创建对应的文件，解析器会静默跳过（`reference-resolver.ts:148-152`），不会中断加载
-
-#### 4. 引用路径冲突
-
-使用 `|skill_compose|` 检测到冲突时：
-
-```
-### Conflicts
-- ⚠️ Reference "guidelines" exists at different paths:
-  ...
-```
-
-**原因与修复：**
-
-- **同名不同文件**：两个技能各自声明了同名引用但指向不同物理文件
-- **解决方案**：统一引用名或合并引用文档到共享位置，避免知识分裂
-
-### 快速排查清单
-
-当技能加载行为不符合预期时，依次检查：
-
-1. **确认文件位置** — 技能文件是否在 `{roleDir}/skills/` 或 `~/.config/opencode/skills/` 下
-2. **确认文件命名** — 目录形式需要 `SKILL.md`（注意大小写），单文件形式需要 `{name}.md`
-3. **确认 role.yaml 注册** — `skills:` 字段中是否包含技能名
-4. **验证 SKILL.md 格式** — frontmatter 是否以 `---` 包裹，YAML 是否合法
-5. **检查引用路径** — `references:` 中的路径相对于技能目录是否正确
-6. **运行 skill_compose** — 用组合分析工具确认技能和引用是否成功加载
-7. **查看日志** — 启用 `LOG_LEVEL=debug` 观察解析器输出
-
-## 技能注册
-
-技能通过在 role.yaml 中声明 `skills` 字段注册：
-
-```yaml
-# role.yaml
-skills:
-  - review-checklist          # 从角色本地或全局技能目录加载
-opencode_skills:             # 从 opencode 全局技能目录加载
-  - humanizer
-```
-
-`skills:` 字段从角色本地 `{roleDir}/skills/` 和全局 `~/.config/opencode/skills/` 目录搜索。
-`opencode_skills:` 字段仅从全局目录搜索，用于共享技能。
+1. 技能目录名与 `role.yaml` 声明名逐字符一致（大小写敏感）。
+2. 目录形式有 `SKILL.md`；单文件形式叫 `{name}.md`。
+3. frontmatter 以 `---` 起止，YAML 合法。
+4. `description` 非空，能说明「什么时候该加载它」。
+5. `references:` 的路径相对技能目录，文件真实存在。
+6. `skill_compose` 无冲突、无缺失。
+7. `rolebox status` 中对应 target 的 `Skill symlinks` 为 `all valid`。
+8. 仍然不对时把 `ROLEBOX_LOG_LEVEL` 设为 `debug`，查看日志文件里的 `skill-resolver` / `reference-resolver` 记录。
 
 ## 下一步
 
-- [技能系统](/02-Guide/skills) — 技能解析顺序与加载机制
-- [引用文档](/02-Guide/references) — 引用文档的自动发现与声明
-- [创建角色](/02-Guide/create-a-role) — 完整的角色创建指南
+- [技能系统](/02-Guide/skills) —— 技能的加载通道、声明与解析顺序
+- [引用文档](/02-Guide/references) —— 自动发现、显式声明与描述推导
+- [创建角色](/02-Guide/create-a-role) —— 完整的角色创建流程
